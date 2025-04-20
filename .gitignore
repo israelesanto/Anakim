@@ -1,0 +1,19 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build results
+bin/
+obj/
+
+# Logs
+*.log
+
+# Arquivos específicos
+*.cache
+*.vsidx
+*.sourcelink.json
+*.editorconfig
+*.g.cs
+*.AssemblyReference.cache
