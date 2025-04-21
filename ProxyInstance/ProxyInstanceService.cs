@@ -5,6 +5,9 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
+using AccessPoint.Infrastructure;
+using System.Collections.Concurrent;
+using Anakim.Infrastructure;
 
 namespace AccessPoint.Infrastructure
 {
@@ -19,22 +22,20 @@ namespace AccessPoint.Infrastructure
         private readonly IConfiguration _configuration;
         private readonly ProxySettings _proxySettings;
         private readonly INodeStatisticsService _nodeStatisticsService;
-
+        private readonly InstanceRankingManager _rankingManager = new();
 
         public ProxyInstanceService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService)
         {
             _configuration = configuration;
 
-            // Carregar configurações do Proxy
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>();
             if (_proxySettings == null)
                 throw new InvalidOperationException("ProxySettings is not configured properly in appsettings.json.");
 
-            _piPort = _proxySettings.Port; // Obtém a porta para escutar os AHs
+            _piPort = _proxySettings.Port;
             if (_piPort <= 0)
                 throw new InvalidOperationException("Invalid Proxy Instance port configuration.");
 
-            // Configurações do Traffic Manager
             var tmSettings = configuration.GetSection("ProxySettings:TrafficManager");
             _tmHost = tmSettings.GetValue<string>("Host");
             _tmPort = tmSettings.GetValue<int>("Port");
@@ -48,11 +49,7 @@ namespace AccessPoint.Infrastructure
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("ProxyInstanceService started.");
-
-            // Iniciar Listener para receber estatísticas dos AHs
             StartListener();
-
-            // Conectar ao Traffic Manager
             await ExecuteConnectionAsync(stoppingToken);
         }
 
@@ -63,7 +60,6 @@ namespace AccessPoint.Infrastructure
                 _listener = new TcpListener(IPAddress.Any, _piPort);
                 _listener.Start();
                 Logger.LogSuccess($"Proxy Instance listening on port {_piPort} for Application Handlers.");
-
                 Task.Run(async () => await AcceptClientsAsync());
             }
             catch (Exception ex)
@@ -142,7 +138,7 @@ namespace AccessPoint.Infrastructure
                 {
                     Logger.LogError($"Failed to connect to Traffic Manager: {ex.Message}");
                     CleanupConnection();
-                    await Task.Delay(5000, stoppingToken); // Retry connection after delay
+                    await Task.Delay(5000, stoppingToken);
                 }
             }
         }
@@ -154,7 +150,6 @@ namespace AccessPoint.Infrastructure
                 while (!stoppingToken.IsCancellationRequested)
                 {
                     var statistics = _nodeStatisticsService.CollectStatistics();
-
                     ValidateStatistics(statistics);
 
                     var message = JsonSerializer.Serialize(statistics);
@@ -163,7 +158,7 @@ namespace AccessPoint.Infrastructure
                     await _stream.WriteAsync(data, stoppingToken);
                     Logger.LogInfo($"Statistics sent to Traffic Manager: {message}");
 
-                    await Task.Delay(5000, stoppingToken); // Send stats every 5 seconds
+                    await Task.Delay(5000, stoppingToken);
                 }
             }
             catch (Exception ex)
@@ -185,11 +180,25 @@ namespace AccessPoint.Infrastructure
                 }
 
                 Logger.LogInfo($"Statistics received from AH: {JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true })}");
+
+                _rankingManager.Update(stats); // <== Atualiza o ranking com as estatísticas recebidas
+
+                var melhor = _rankingManager.GetBestInstance();
+                if (melhor != null)
+                {
+                    Logger.LogInfo($"Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
+                }
+
             }
             catch (Exception ex)
             {
                 Logger.LogError($"Error processing statistics: {ex.Message}");
             }
+        }
+
+        public NodeStatistics? GetBestApplicationHandler()
+        {
+            return _rankingManager.GetBestInstance();
         }
 
         private void CleanupConnection()

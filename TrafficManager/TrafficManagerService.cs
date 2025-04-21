@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
+using AccessPoint.Infrastructure;
+using Anakim.Infrastructure;
 
 namespace AccessPoint.Infrastructure
 {
@@ -13,8 +15,8 @@ namespace AccessPoint.Infrastructure
         private TcpListener _listener;
         private int _port;
 
-        // Armazena estatísticas recebidas de cada PI
-        private readonly Dictionary<string, NodeStatistics> _nodeStatistics = new();
+        // Ranking de Proxy Instances
+        private readonly InstanceRankingManager _rankingManager = new();
 
         public TrafficManagerService(IConfiguration configuration)
         {
@@ -79,7 +81,6 @@ namespace AccessPoint.Infrastructure
 
                     ProcessStatistics(message);
 
-                    // Respond to the client
                     var response = Encoding.UTF8.GetBytes("ACK");
                     await stream.WriteAsync(response, cancellationToken);
                 }
@@ -100,23 +101,33 @@ namespace AccessPoint.Infrastructure
             try
             {
                 var stats = JsonSerializer.Deserialize<NodeStatistics>(jsonMessage);
-                if (stats == null || string.IsNullOrEmpty(stats.SenderIp))
+                if (stats == null || string.IsNullOrEmpty(stats.ProcessStat?.InstanceId))
                 {
                     Logger.LogWarning("Invalid or incomplete statistics received.");
                     return;
                 }
 
-                // Update the statistics for the corresponding PI
-                _nodeStatistics[stats.SenderIp] = stats;
-                Logger.LogInfo($"Statistics updated for {stats.SenderIp}");
+                _rankingManager.Update(stats);
+                Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
 
-                // Example log for debugging
                 Logger.LogInfo(JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
+
+                var melhor = _rankingManager.GetBestInstance();
+                if (melhor != null)
+                {
+                    Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
+                }
+
             }
             catch (Exception ex)
             {
                 Logger.LogError($"Error processing statistics: {ex.Message}");
             }
+        }
+
+        public NodeStatistics? GetBestProxyInstance()
+        {
+            return _rankingManager.GetBestInstance();
         }
     }
 }
