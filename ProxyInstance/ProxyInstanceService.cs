@@ -49,18 +49,18 @@ namespace AccessPoint.Infrastructure
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("ProxyInstanceService started.");
-            StartListener();
+            StartListener(stoppingToken);
             await ExecuteConnectionAsync(stoppingToken);
         }
 
-        private void StartListener()
+        private void StartListener(CancellationToken stoppingToken)
         {
             try
             {
                 _listener = new TcpListener(IPAddress.Any, _piPort);
                 _listener.Start();
                 Logger.LogSuccess($"Proxy Instance listening on port {_piPort} for Application Handlers.");
-                Task.Run(async () => await AcceptClientsAsync());
+                Task.Run(() => AcceptClientsAsync(stoppingToken));
             }
             catch (Exception ex)
             {
@@ -68,14 +68,19 @@ namespace AccessPoint.Infrastructure
             }
         }
 
-        private async Task AcceptClientsAsync()
+        private async Task AcceptClientsAsync(CancellationToken stoppingToken)
         {
-            while (true)
+            while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
-                    var client = await _listener.AcceptTcpClientAsync();
+                    var client = await _listener.AcceptTcpClientAsync(stoppingToken);
                     _ = HandleClientAsync(client);
+                }
+                catch (OperationCanceledException)
+                {
+                    Logger.LogInfo("Accepting clients canceled.");
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -86,9 +91,15 @@ namespace AccessPoint.Infrastructure
 
         private async Task HandleClientAsync(TcpClient client)
         {
-            Logger.LogInfo($"Application Handler connected: {client.Client.RemoteEndPoint}");
+            NodeStatistics? ultimoStatsRecebido = null;
+
             try
             {
+                if (client?.Client != null)
+                    Logger.LogInfo($"Application Handler connected: {client.Client.RemoteEndPoint}");
+                else
+                    Logger.LogInfo("Application Handler connected (socket was null)");
+
                 var stream = client.GetStream();
                 var buffer = new byte[2048];
 
@@ -98,14 +109,20 @@ namespace AccessPoint.Infrastructure
 
                     if (bytesRead == 0)
                     {
-                        Logger.LogWarning($"Client {client.Client.RemoteEndPoint} disconnected.");
+                        if (client?.Client != null)
+                            Logger.LogWarning($"Client {client.Client.RemoteEndPoint} disconnected.");
+                        else
+                            Logger.LogWarning("Client disconnected (socket was null).");
+
                         break;
                     }
 
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     Logger.LogInfo($"Received from AH: {message}");
 
-                    ProcessStatistics(message);
+                    var stats = ProcessStatistics(message);
+                    if (stats != null)
+                        ultimoStatsRecebido = stats;
                 }
             }
             catch (Exception ex)
@@ -114,8 +131,21 @@ namespace AccessPoint.Infrastructure
             }
             finally
             {
-                client.Close();
-                Logger.LogInfo($"Connection closed for {client.Client.RemoteEndPoint}");
+                client?.Close();
+
+                if (client?.Client != null)
+                    Logger.LogInfo($"Connection closed for {client.Client.RemoteEndPoint}");
+                else
+                    Logger.LogInfo("Connection closed for unknown client (socket was null)");
+
+                if (ultimoStatsRecebido?.ProcessStat?.InstanceId != null)
+                {
+                    var removed = _rankingManager.Remove(ultimoStatsRecebido.ProcessStat.InstanceId);
+                    if (removed)
+                        Logger.LogInfo($"✅ Instance {ultimoStatsRecebido.ProcessStat.InstanceName} removida do ranking.");
+                    else
+                        Logger.LogWarning($"⚠️ Falha ao remover: {ultimoStatsRecebido.ProcessStat.InstanceId} não encontrado no ranking.");
+                }
             }
         }
 
@@ -168,7 +198,7 @@ namespace AccessPoint.Infrastructure
             }
         }
 
-        private void ProcessStatistics(string jsonMessage)
+        private NodeStatistics? ProcessStatistics(string jsonMessage)
         {
             try
             {
@@ -176,23 +206,25 @@ namespace AccessPoint.Infrastructure
                 if (stats == null)
                 {
                     Logger.LogWarning("Invalid or incomplete statistics received.");
-                    return;
+                    return null;
                 }
 
                 Logger.LogInfo($"Statistics received from AH: {JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true })}");
 
-                _rankingManager.Update(stats); // <== Atualiza o ranking com as estatísticas recebidas
+                _rankingManager.Update(stats);
 
                 var melhor = _rankingManager.GetBestInstance();
                 if (melhor != null)
                 {
-                    Logger.LogInfo($"Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
+                    Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
                 }
 
+                return stats;
             }
             catch (Exception ex)
             {
                 Logger.LogError($"Error processing statistics: {ex.Message}");
+                return null;
             }
         }
 

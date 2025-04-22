@@ -15,7 +15,6 @@ namespace AccessPoint.Infrastructure
         private TcpListener _listener;
         private int _port;
 
-        // Ranking de Proxy Instances
         private readonly InstanceRankingManager _rankingManager = new();
 
         public TrafficManagerService(IConfiguration configuration)
@@ -60,9 +59,15 @@ namespace AccessPoint.Infrastructure
 
         private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
         {
-            Logger.LogInfo($"Connection established with {client.Client.RemoteEndPoint}");
+            NodeStatistics? ultimoStatsRecebido = null;
+
             try
             {
+                if (client?.Client != null)
+                    Logger.LogInfo($"Connection established with {client.Client.RemoteEndPoint}");
+                else
+                    Logger.LogInfo("Connection established with unknown client (socket was null)");
+
                 var stream = client.GetStream();
                 var buffer = new byte[2048];
 
@@ -72,14 +77,36 @@ namespace AccessPoint.Infrastructure
 
                     if (bytesRead == 0)
                     {
-                        Logger.LogWarning($"Client {client.Client.RemoteEndPoint} disconnected.");
+                        if (client?.Client != null)
+                            Logger.LogWarning($"Client {client.Client.RemoteEndPoint} disconnected.");
+                        else
+                            Logger.LogWarning("Client disconnected (socket was null).");
+
                         break;
                     }
 
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     Logger.LogInfo($"Received: {message}");
 
-                    ProcessStatistics(message);
+                    var stats = JsonSerializer.Deserialize<NodeStatistics>(message);
+                    if (stats != null && !string.IsNullOrEmpty(stats.ProcessStat?.InstanceId))
+                    {
+                        ultimoStatsRecebido = stats;
+                        _rankingManager.Update(stats);
+
+                        Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
+                        Logger.LogInfo(JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
+
+                        var melhor = _rankingManager.GetBestInstance();
+                        if (melhor != null)
+                        {
+                            Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
+                        }
+                    }
+                    else
+                    {
+                        Logger.LogWarning("Invalid or incomplete statistics received.");
+                    }
 
                     var response = Encoding.UTF8.GetBytes("ACK");
                     await stream.WriteAsync(response, cancellationToken);
@@ -91,39 +118,24 @@ namespace AccessPoint.Infrastructure
             }
             finally
             {
-                client.Close();
-                Logger.LogInfo($"Connection closed for {client.Client.RemoteEndPoint}");
+                client?.Close();
+
+                if (client?.Client != null)
+                    Logger.LogInfo($"Connection closed for {client.Client.RemoteEndPoint}");
+                else
+                    Logger.LogInfo("Connection closed for unknown client (socket was null)");
+
+                if (ultimoStatsRecebido?.ProcessStat?.InstanceId != null)
+                {
+                    var removed = _rankingManager.Remove(ultimoStatsRecebido.ProcessStat.InstanceId);
+                    if (removed)
+                        Logger.LogInfo($"✅ Instance {ultimoStatsRecebido.ProcessStat.InstanceName} removida do ranking.");
+                    else
+                        Logger.LogWarning($"⚠️ Falha ao remover: {ultimoStatsRecebido.ProcessStat.InstanceId} não encontrado no ranking.");
+                }
             }
         }
 
-        private void ProcessStatistics(string jsonMessage)
-        {
-            try
-            {
-                var stats = JsonSerializer.Deserialize<NodeStatistics>(jsonMessage);
-                if (stats == null || string.IsNullOrEmpty(stats.ProcessStat?.InstanceId))
-                {
-                    Logger.LogWarning("Invalid or incomplete statistics received.");
-                    return;
-                }
-
-                _rankingManager.Update(stats);
-                Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
-
-                Logger.LogInfo(JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
-
-                var melhor = _rankingManager.GetBestInstance();
-                if (melhor != null)
-                {
-                    Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
-                }
-
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Error processing statistics: {ex.Message}");
-            }
-        }
 
         public NodeStatistics? GetBestProxyInstance()
         {

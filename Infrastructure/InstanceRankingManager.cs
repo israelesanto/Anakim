@@ -3,27 +3,45 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Anakim.Infrastructure
 {
     public class InstanceRankingManager
     {
-        private readonly ConcurrentDictionary<string, NodeStatistics> _instances = new();
+        private class TimedStat
+        {
+            public NodeStatistics Statistics { get; set; }
+            public DateTime LastUpdateUtc { get; set; }
+        }
+
+        private readonly ConcurrentDictionary<string, TimedStat> _instances = new();
+        private readonly TimeSpan _expirationTime = TimeSpan.FromSeconds(15);
 
         public void Update(NodeStatistics stats)
         {
             if (stats?.ProcessStat?.InstanceId == null)
                 return;
 
-            _instances[stats.ProcessStat.InstanceId] = stats;
+            _instances[stats.ProcessStat.InstanceId] = new TimedStat
+            {
+                Statistics = stats,
+                LastUpdateUtc = DateTime.UtcNow
+            };
+        }
+
+        // ✅ Agora retorna true ou false conforme sucesso da remoção
+        public bool Remove(string instanceId)
+        {
+            return _instances.TryRemove(instanceId, out _);
         }
 
         public NodeStatistics? GetBestInstance()
         {
+            var now = DateTime.UtcNow;
+
             return _instances.Values
-                .Where(x => x != null)
+                .Where(x => now - x.LastUpdateUtc <= _expirationTime)
+                .Select(x => x.Statistics)
                 .OrderBy(x => x.ProcessStat.CpuUsage)
                 .ThenBy(x => x.ProcessStat.MemoryUsageMB)
                 .ThenBy(x => x.ProcessStat.ActiveThreads)
@@ -31,7 +49,14 @@ namespace Anakim.Infrastructure
         }
 
         public IReadOnlyCollection<NodeStatistics> GetAll()
-            => _instances.Values.ToList().AsReadOnly();
-    }
+        {
+            var now = DateTime.UtcNow;
 
+            return _instances.Values
+                .Where(x => now - x.LastUpdateUtc <= _expirationTime)
+                .Select(x => x.Statistics)
+                .ToList()
+                .AsReadOnly();
+        }
+    }
 }
