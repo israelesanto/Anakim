@@ -5,7 +5,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using AccessPoint.Infrastructure;
+using Anakim.Infrastructure;
 using System.Security.Cryptography.X509Certificates;
 
 class Program
@@ -62,7 +62,7 @@ class Program
                     {
                         endpoints.MapGet("/", async context =>
                         {
-                            await context.Response.WriteAsync("AccessPoint is running!");
+                            await context.Response.WriteAsync("Anakim is running!");
                         });
                     });
                 });

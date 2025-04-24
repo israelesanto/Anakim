@@ -3,7 +3,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace AccessPoint.Infrastructure
+namespace Anakim.Infrastructure
 {
     public class WorkerService : BackgroundService
     {

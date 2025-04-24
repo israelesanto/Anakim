@@ -4,7 +4,7 @@ using System.Net.Sockets;
 using System.Net;
 using System.Threading;
 
-namespace AccessPoint.Infrastructure
+namespace Anakim.Infrastructure
 {
     public class NodeStatistics
     {

@@ -7,7 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace AccessPoint.Infrastructure
+namespace Anakim.Infrastructure
 {
     public static class Logger
     {

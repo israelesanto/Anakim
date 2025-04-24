@@ -1,4 +1,4 @@
-﻿namespace AccessPoint.Infrastructure
+﻿namespace Anakim.Infrastructure
 {
     public interface INodeStatisticsService
     {

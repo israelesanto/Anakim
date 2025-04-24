@@ -4,10 +4,10 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
-using AccessPoint.Infrastructure;
+using Anakim.Infrastructure;
 using Anakim.Infrastructure;
 
-namespace AccessPoint.Infrastructure
+namespace Anakim.Infrastructure
 {
     public class TrafficManagerService : IHostedService
     {

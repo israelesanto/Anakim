@@ -5,11 +5,11 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using AccessPoint.Infrastructure;
+using Anakim.Infrastructure;
 using System.Collections.Concurrent;
 using Anakim.Infrastructure;
 
-namespace AccessPoint.Infrastructure
+namespace Anakim.Infrastructure
 {
     public class ProxyInstanceService : BackgroundService
     {

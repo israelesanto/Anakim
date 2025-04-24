@@ -6,7 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
-namespace AccessPoint.Infrastructure
+namespace Anakim.Infrastructure
 {
     public class ApplicationHandlerService : BackgroundService
     {
