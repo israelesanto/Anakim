@@ -9,7 +9,7 @@ using Anakim.Infrastructure;
 using System.Collections.Concurrent;
 using Anakim.Infrastructure;
 
-namespace Anakim.Infrastructure
+namespace Anakim.ProxyInstance
 {
     public class ProxyInstanceService : BackgroundService
     {

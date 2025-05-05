@@ -64,8 +64,9 @@
 //}
 
 using Microsoft.AspNetCore.Http;
+using Anakim.Infrastructure;
 
-namespace Anakim.Infrastructure
+namespace Anakim.ProxyInstance
 {
     public class RedirectToBestAHMiddleware
     {

@@ -6,9 +6,7 @@ using System.Threading.Tasks;
 
 namespace Anakim.ProxyInstance
 {
-    public class ProxyInstanceConfig
+    internal class ApplicationHandlerInfo
     {
-        public string Host { get; set; }
-        public int Port { get; set; }
     }
 }
