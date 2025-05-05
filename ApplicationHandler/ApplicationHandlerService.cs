@@ -18,11 +18,13 @@ namespace Anakim.Infrastructure
         private NetworkStream _stream;
         private readonly IConfiguration _configuration;
         private readonly INodeStatisticsService _nodeStatisticsService;
+        private readonly ProxySettings _proxySettings;
 
 
         public ApplicationHandlerService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService)
         {
             _configuration = configuration;
+            _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>();
 
             // Acessa os dados do ProxyInstance
             var proxyInstanceSettings = configuration.GetSection("ProxySettings:ProxyInstance");
@@ -30,9 +32,11 @@ namespace Anakim.Infrastructure
             _piPort = proxyInstanceSettings.GetValue<int>("Port");
 
             // Acessa os dados gerais do ProxySettings
-            var proxySettings = configuration.GetSection("ProxySettings");
-            _instanceId = proxySettings.GetValue<string>("InstanceId");
-            _instanceName = proxySettings.GetValue<string>("InstanceName");
+            //var proxySettings = configuration.GetSection("ProxySettings");
+            //_instanceId = _proxySettings.GetValue<string>("InstanceId");
+            //_instanceName = _proxySettings.GetValue<string>("InstanceName");
+            _instanceId = _proxySettings.InstanceId;
+            _instanceName = _proxySettings.InstanceName;
 
             if (string.IsNullOrEmpty(_piHost) || _piPort <= 0)
             {
@@ -94,9 +98,10 @@ namespace Anakim.Infrastructure
                     var data = Encoding.UTF8.GetBytes(message);
 
                     await _stream.WriteAsync(data, stoppingToken);
-                    Logger.LogInfo($"Statistics sent to Proxy Instance: {message}");
+                    //Logger.LogInfo($"Statistics sent to Proxy Instance: {message}");
+                    Logger.LogInfo($"Statistics sent to Proxy Instance: {statistics.ProcessStat.InstanceName}");
 
-                    await Task.Delay(5000, stoppingToken); // Send stats every 5 seconds
+                    await Task.Delay(_proxySettings.TimeUpdate, stoppingToken); // Send stats every 5 seconds
                 }
             }
             catch (Exception ex)

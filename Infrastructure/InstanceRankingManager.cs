@@ -42,9 +42,9 @@ namespace Anakim.Infrastructure
             return _instances.Values
                 .Where(x => now - x.LastUpdateUtc <= _expirationTime)
                 .Select(x => x.Statistics)
-                .OrderBy(x => x.ProcessStat.CpuUsage)
-                .ThenBy(x => x.ProcessStat.MemoryUsageMB)
-                .ThenBy(x => x.ProcessStat.ActiveThreads)
+                .OrderBy(x =>
+                    (x.ProcessStat.CpuUsage * 0.0) +
+                    (x.ProcessStat.PrivateMemoryMB * 1.0))
                 .FirstOrDefault();
         }
 

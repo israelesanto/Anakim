@@ -17,9 +17,10 @@ namespace Anakim.Infrastructure
 
         private readonly InstanceRankingManager _rankingManager = new();
 
-        public TrafficManagerService(IConfiguration configuration)
+        public TrafficManagerService(IConfiguration configuration, InstanceRankingManager rankingManager)
         {
             _configuration = configuration;
+            _rankingManager = rankingManager;
             var settings = _configuration.GetSection("ProxySettings");
             if (settings.GetValue<int>("Mode") != 1)
                 throw new InvalidOperationException("TrafficManagerService should only run in Traffic Manager mode (Mode: 1).");
@@ -86,7 +87,8 @@ namespace Anakim.Infrastructure
                     }
 
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Logger.LogInfo($"Received: {message}");
+                    //Logger.LogInfo($"Received: {message}");
+                    
 
                     var stats = JsonSerializer.Deserialize<NodeStatistics>(message);
                     if (stats != null && !string.IsNullOrEmpty(stats.ProcessStat?.InstanceId))
@@ -95,12 +97,12 @@ namespace Anakim.Infrastructure
                         _rankingManager.Update(stats);
 
                         Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
-                        Logger.LogInfo(JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
+                        //Logger.LogInfo(JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
 
                         var melhor = _rankingManager.GetBestInstance();
                         if (melhor != null)
                         {
-                            Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
+                            Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.PrivateMemoryMB}MB");
                         }
                     }
                     else

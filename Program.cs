@@ -7,13 +7,15 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Anakim.Infrastructure;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.Json;
 
 class Program
 {
     static async Task Main(string[] args)
     {
         var builder = Host.CreateDefaultBuilder(args)
-            .UseWindowsService() // Permite executar como serviço do Windows
+            .UseWindowsService()
             .ConfigureAppConfiguration((hostingContext, config) =>
             {
                 config.SetBasePath(AppContext.BaseDirectory)
@@ -57,12 +59,51 @@ class Program
                 })
                 .Configure(app =>
                 {
+                    var config = app.ApplicationServices.GetRequiredService<IConfiguration>();
+                    var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>();
+
                     app.UseRouting();
+
+                    switch (proxySettings.Mode)
+                    {
+                        case 1: // Traffic Manager
+                            app.UseMiddleware<RedirectToBestPIMiddleware>();
+                            break;
+                        case 2: // Proxy Instance
+                            app.UseMiddleware<RedirectToBestAHMiddleware>();
+                            break;
+                        case 3: // Application Handler não redireciona
+                            break;
+                    }
+
                     app.UseEndpoints(endpoints =>
                     {
                         endpoints.MapGet("/", async context =>
                         {
-                            await context.Response.WriteAsync("Anakim is running!");
+                            var instanceName = proxySettings.InstanceName ?? "Unknown";
+                            var uid = Guid.NewGuid();
+                            var timestamp = DateTime.UtcNow;
+                            var threadCount = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+                            var threadPoolcount = ThreadPool.ThreadCount;
+
+                            var response = new
+                            {
+                                uid,
+                                timestamp,
+                                instance = instanceName,
+                                activeThreads = threadCount,
+                                activeThrPoolcount = threadPoolcount
+                            };
+
+                            var json = JsonSerializer.Serialize(response);
+                            var jsonBytes = Encoding.UTF8.GetBytes(json);
+
+                            context.Response.StatusCode = 200;
+                            context.Response.ContentType = "application/json";
+                            context.Response.ContentLength = jsonBytes.Length;
+
+                            await context.Response.Body.WriteAsync(jsonBytes);
+                            await context.Response.Body.FlushAsync();
                         });
                     });
                 });
@@ -76,9 +117,9 @@ class Program
                     ?? throw new InvalidOperationException("ProxySettings not configured properly.");
 
                 services.AddSingleton(proxySettings);
-                services.AddSingleton<INodeStatisticsService, NodeStatisticsService>(); // Serviço de estatísticas
+                services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
+                services.AddSingleton<InstanceRankingManager>(); // ✅ necessário para os redirecionamentos
 
-                // Seleção dinâmica do serviço correto baseado no modo configurado
                 switch (proxySettings.Mode)
                 {
                     case 1:
@@ -96,9 +137,6 @@ class Program
                     default:
                         throw new InvalidOperationException($"Invalid mode: {proxySettings.Mode}");
                 }
-
-                // Registra WorkerService como serviço de fundo
-                //services.AddHostedService<WorkerService>();
             })
             .Build();
 
@@ -107,7 +145,7 @@ class Program
     }
 }
 
-// 🚀 WorkerService Agora Usa Injeção de Dependência Corretamente
+// (opcional) WorkerService com injeção dinâmica, mantido apenas como exemplo
 public class WorkerService : BackgroundService
 {
     private readonly IHostedService _service;

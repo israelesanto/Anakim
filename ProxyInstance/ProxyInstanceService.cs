@@ -24,10 +24,10 @@ namespace Anakim.Infrastructure
         private readonly INodeStatisticsService _nodeStatisticsService;
         private readonly InstanceRankingManager _rankingManager = new();
 
-        public ProxyInstanceService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService)
+        public ProxyInstanceService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService, InstanceRankingManager rankingManager)
         {
             _configuration = configuration;
-
+            _rankingManager = rankingManager;
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>();
             if (_proxySettings == null)
                 throw new InvalidOperationException("ProxySettings is not configured properly in appsettings.json.");
@@ -118,7 +118,7 @@ namespace Anakim.Infrastructure
                     }
 
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Logger.LogInfo($"Received from AH: {message}");
+                    //Logger.LogInfo($"Received from AH: {message}");
 
                     var stats = ProcessStatistics(message);
                     if (stats != null)
@@ -168,7 +168,7 @@ namespace Anakim.Infrastructure
                 {
                     Logger.LogError($"Failed to connect to Traffic Manager: {ex.Message}");
                     CleanupConnection();
-                    await Task.Delay(5000, stoppingToken);
+                    await Task.Delay(_proxySettings.TimeUpdate, stoppingToken);
                 }
             }
         }
@@ -186,9 +186,10 @@ namespace Anakim.Infrastructure
                     var data = Encoding.UTF8.GetBytes(message);
 
                     await _stream.WriteAsync(data, stoppingToken);
-                    Logger.LogInfo($"Statistics sent to Traffic Manager: {message}");
+                    //Logger.LogInfo($"Statistics sent to Traffic Manager: {message}");
+                    Logger.LogInfo($"Statistics sent to Traffic Manager: {statistics.ProcessStat.InstanceName}");
 
-                    await Task.Delay(5000, stoppingToken);
+                    await Task.Delay(_proxySettings.TimeUpdate, stoppingToken);
                 }
             }
             catch (Exception ex)
@@ -209,14 +210,14 @@ namespace Anakim.Infrastructure
                     return null;
                 }
 
-                Logger.LogInfo($"Statistics received from AH: {JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true })}");
+                //Logger.LogInfo($"Statistics received from AH: {JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true })}");
 
                 _rankingManager.Update(stats);
 
                 var melhor = _rankingManager.GetBestInstance();
                 if (melhor != null)
                 {
-                    Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.MemoryUsageMB}MB");
+                    Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.PrivateMemoryMB}MB");
                 }
 
                 return stats;
