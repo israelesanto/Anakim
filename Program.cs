@@ -6,9 +6,11 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Anakim.Infrastructure;
 using Anakim.ProxyInstance;
+using Anakim.ProxyInstance.Failover; // ✅ adicionado
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Anakim.TrafficManager;
 
 class Program
 {
@@ -125,10 +127,12 @@ class Program
                     case 1:
                         Logger.LogInfo("Configuring as Traffic Manager");
                         services.AddHostedService<TrafficManagerService>();
+                        services.AddSingleton<FailoverManager>();
                         break;
                     case 2:
                         Logger.LogInfo("Configuring as Proxy Instance");
                         services.AddHostedService<ProxyInstanceService>();
+                        services.AddSingleton<FailoverManager>(); // ✅ failover registrado aqui
                         break;
                     case 3:
                         Logger.LogInfo("Configuring as Application Handler");

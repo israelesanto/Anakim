@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Hosting;
 using Anakim.ProxyInstance;
+using Anakim.TrafficManager;
 
 namespace Anakim.Infrastructure
 {

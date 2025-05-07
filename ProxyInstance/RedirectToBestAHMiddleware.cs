@@ -1,70 +1,6 @@
-﻿//using System.Net.Http;
-//using Anakim.Infrastructure;
-//using Microsoft.AspNetCore.Http;
-
-//namespace Anakim.Infrastructure
-//{
-//    public class RedirectToBestAHMiddleware
-//    {
-//        private readonly RequestDelegate _next;
-//        private readonly InstanceRankingManager _rankingManager;
-
-//        public RedirectToBestAHMiddleware(RequestDelegate next, InstanceRankingManager rankingManager)
-//        {
-//            _next = next;
-//            _rankingManager = rankingManager;
-//        }
-
-//        public async Task InvokeAsync(HttpContext context)
-//        {
-//            Logger.LogInfo($"Request received on Host: {context.Request.Host.Host}");
-
-//            var bestAH = _rankingManager.GetBestInstance();
-
-//            if (bestAH == null)
-//            {
-//                context.Response.StatusCode = 503;
-//                await context.Response.WriteAsync("Nenhum AH disponível.");
-//                return;
-//            }
-
-//            var destinationUrl = $"https://{bestAH.SenderIp}:{bestAH.Ports.Api}{context.Request.Path}{context.Request.QueryString}";
-
-//            using var client = new HttpClient();
-//            var requestMessage = new HttpRequestMessage(new HttpMethod(context.Request.Method), destinationUrl);
-
-//            if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
-//                requestMessage.Content = new StreamContent(context.Request.Body);
-
-//            foreach (var header in context.Request.Headers)
-//                requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
-
-//            try
-//            {
-//                var responseMessage = await client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
-
-//                context.Response.StatusCode = (int)responseMessage.StatusCode;
-
-//                foreach (var header in responseMessage.Headers)
-//                    context.Response.Headers[header.Key] = header.Value.ToArray();
-
-//                foreach (var header in responseMessage.Content.Headers)
-//                    context.Response.Headers[header.Key] = header.Value.ToArray();
-
-//                await responseMessage.Content.CopyToAsync(context.Response.Body);
-//            }
-//            catch (Exception ex)
-//            {
-//                Logger.LogError($"Erro ao redirecionar para AH: {ex.Message}");
-//                context.Response.StatusCode = 502;
-//                await context.Response.WriteAsync("Erro ao redirecionar para o AH.");
-//            }
-//        }
-//    }
-//}
-
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Anakim.Infrastructure;
+using Anakim.ProxyInstance.Failover;
 
 namespace Anakim.ProxyInstance
 {
@@ -72,77 +8,77 @@ namespace Anakim.ProxyInstance
     {
         private readonly RequestDelegate _next;
         private readonly InstanceRankingManager _rankingManager;
+        private readonly FailoverManager _failoverManager;
 
-        // ✅ HttpClient singleton
-        private static readonly HttpClient _httpClient = new HttpClient(
-            new HttpClientHandler
-            {
-                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-            })
-        {
-            Timeout = TimeSpan.FromSeconds(30) // ajuste conforme necessário
-        };
-
-        public RedirectToBestAHMiddleware(RequestDelegate next, InstanceRankingManager rankingManager)
+        public RedirectToBestAHMiddleware(RequestDelegate next, InstanceRankingManager rankingManager, FailoverManager failoverManager)
         {
             _next = next;
             _rankingManager = rankingManager;
+            _failoverManager = failoverManager;
         }
 
         public async Task InvokeAsync(HttpContext context)
         {
             Logger.LogInfo($"Request received on Host: {context.Request.Host.Host}");
 
-            var bestAH = _rankingManager.GetBestInstance();
+            var rankedInstances = _rankingManager.GetRankedInstances();
 
-            if (bestAH == null)
+            if (!rankedInstances.Any())
             {
                 context.Response.StatusCode = 503;
                 await context.Response.WriteAsync("Nenhum AH disponível.");
                 return;
             }
 
-            var destinationUrl = $"https://{bestAH.SenderIp}:{bestAH.Ports.Api}{context.Request.Path}{context.Request.QueryString}";
-
-            var requestMessage = new HttpRequestMessage(new HttpMethod(context.Request.Method), destinationUrl);
-
-            // Copia o corpo da requisição se não for GET ou HEAD
-            if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
+            var handlerList = rankedInstances.Select(ah => new ApplicationHandlerInfo
             {
-                requestMessage.Content = new StreamContent(context.Request.Body);
-            }
+                InstanceId = ah.ProcessStat.InstanceId,
+                Url = $"https://{ah.SenderIp}:{ah.Ports.Api}",
+                Ranking = ah.ProcessStat.PrivateMemoryMB // ajuste aqui a lógica desejada
+            }).ToList();
 
-            // Copia os headers
-            foreach (var header in context.Request.Headers)
-            {
-                requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
-            }
+            _failoverManager.UpdateHandlers(handlerList);
+
+            var requestMessage = CreateHttpRequestFromContext(context);
 
             try
             {
-                var responseMessage = await _httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+                var responseMessage = await _failoverManager.ForwardWithFailover(requestMessage);
 
                 context.Response.StatusCode = (int)responseMessage.StatusCode;
 
                 foreach (var header in responseMessage.Headers)
-                {
                     context.Response.Headers[header.Key] = header.Value.ToArray();
-                }
 
                 foreach (var header in responseMessage.Content.Headers)
-                {
                     context.Response.Headers[header.Key] = header.Value.ToArray();
-                }
 
                 await responseMessage.Content.CopyToAsync(context.Response.Body);
             }
             catch (Exception ex)
             {
-                Logger.LogError($"Erro ao redirecionar para AH: {ex.Message}");
+                Logger.LogError($"Erro ao redirecionar com failover: {ex.Message}");
                 context.Response.StatusCode = 502;
-                await context.Response.WriteAsync("Erro ao redirecionar para o AH.");
+                await context.Response.WriteAsync("Erro ao redirecionar para o AH com failover.");
             }
+        }
+
+        private HttpRequestMessage CreateHttpRequestFromContext(HttpContext context)
+        {
+            var placeholderUrl = "http://placeholder"; // será substituído internamente
+            var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), placeholderUrl);
+
+            if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
+            {
+                request.Content = new StreamContent(context.Request.Body);
+            }
+
+            foreach (var header in context.Request.Headers)
+            {
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
+            }
+
+            return request;
         }
     }
 }
-

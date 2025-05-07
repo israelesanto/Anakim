@@ -7,7 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Anakim.Infrastructure;
 using Anakim.Infrastructure;
 
-namespace Anakim.Infrastructure
+namespace Anakim.TrafficManager
 {
     public class TrafficManagerService : IHostedService
     {

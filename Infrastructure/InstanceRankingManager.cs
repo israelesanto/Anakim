@@ -29,7 +29,6 @@ namespace Anakim.Infrastructure
             };
         }
 
-        // ✅ Agora retorna true ou false conforme sucesso da remoção
         public bool Remove(string instanceId)
         {
             return _instances.TryRemove(instanceId, out _);
@@ -57,6 +56,20 @@ namespace Anakim.Infrastructure
                 .Select(x => x.Statistics)
                 .ToList()
                 .AsReadOnly();
+        }
+
+        // ✅ Novo método para integração com FailoverManager
+        public List<NodeStatistics> GetRankedInstances()
+        {
+            var now = DateTime.UtcNow;
+
+            return _instances.Values
+                .Where(x => now - x.LastUpdateUtc <= _expirationTime)
+                .Select(x => x.Statistics)
+                .OrderBy(x =>
+                    (x.ProcessStat.CpuUsage * 0.0) +
+                    (x.ProcessStat.PrivateMemoryMB * 1.0))
+                .ToList();
         }
     }
 }
