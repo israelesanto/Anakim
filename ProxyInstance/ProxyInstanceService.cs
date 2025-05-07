@@ -6,11 +6,10 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Anakim.Infrastructure;
-using System.Collections.Concurrent;
-using Anakim.Infrastructure;
 
 namespace Anakim.ProxyInstance
 {
+    // This background service acts as a Proxy Instance: it listens to Application Handlers and reports stats to the Traffic Manager
     public class ProxyInstanceService : BackgroundService
     {
         private readonly string _tmHost;
@@ -28,9 +27,8 @@ namespace Anakim.ProxyInstance
         {
             _configuration = configuration;
             _rankingManager = rankingManager;
-            _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>();
-            if (_proxySettings == null)
-                throw new InvalidOperationException("ProxySettings is not configured properly in appsettings.json.");
+            _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
+                ?? throw new InvalidOperationException("ProxySettings is not configured properly in appsettings.json.");
 
             _piPort = _proxySettings.Port;
             if (_piPort <= 0)
@@ -46,13 +44,15 @@ namespace Anakim.ProxyInstance
             _nodeStatisticsService = nodeStatisticsService ?? throw new ArgumentNullException(nameof(nodeStatisticsService));
         }
 
+        // Entry point for the background service
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("ProxyInstanceService started.");
-            StartListener(stoppingToken);
-            await ExecuteConnectionAsync(stoppingToken);
+            StartListener(stoppingToken);                // Start listening for Application Handlers
+            await ExecuteConnectionAsync(stoppingToken); // Connect to the Traffic Manager
         }
 
+        // Starts the TCP listener for receiving statistics from Application Handlers
         private void StartListener(CancellationToken stoppingToken)
         {
             try
@@ -68,6 +68,7 @@ namespace Anakim.ProxyInstance
             }
         }
 
+        // Accepts incoming TCP clients asynchronously
         private async Task AcceptClientsAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -89,16 +90,15 @@ namespace Anakim.ProxyInstance
             }
         }
 
+        // Handles communication with a connected Application Handler
         private async Task HandleClientAsync(TcpClient client)
         {
-            NodeStatistics? ultimoStatsRecebido = null;
+            NodeStatistics? lastReceivedStats = null;
 
             try
             {
-                if (client?.Client != null)
-                    Logger.LogInfo($"Application Handler connected: {client.Client.RemoteEndPoint}");
-                else
-                    Logger.LogInfo("Application Handler connected (socket was null)");
+                var remoteInfo = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
+                Logger.LogInfo($"Application Handler connected: {remoteInfo}");
 
                 var stream = client.GetStream();
                 var buffer = new byte[2048];
@@ -106,23 +106,16 @@ namespace Anakim.ProxyInstance
                 while (true)
                 {
                     var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length));
-
                     if (bytesRead == 0)
                     {
-                        if (client?.Client != null)
-                            Logger.LogWarning($"Client {client.Client.RemoteEndPoint} disconnected.");
-                        else
-                            Logger.LogWarning("Client disconnected (socket was null).");
-
+                        Logger.LogWarning($"Client {remoteInfo} disconnected.");
                         break;
                     }
 
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    //Logger.LogInfo($"Received from AH: {message}");
-
                     var stats = ProcessStatistics(message);
                     if (stats != null)
-                        ultimoStatsRecebido = stats;
+                        lastReceivedStats = stats;
                 }
             }
             catch (Exception ex)
@@ -131,24 +124,22 @@ namespace Anakim.ProxyInstance
             }
             finally
             {
+                var remoteInfo = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
                 client?.Close();
+                Logger.LogInfo($"Connection closed for {remoteInfo}");
 
-                if (client?.Client != null)
-                    Logger.LogInfo($"Connection closed for {client.Client.RemoteEndPoint}");
-                else
-                    Logger.LogInfo("Connection closed for unknown client (socket was null)");
-
-                if (ultimoStatsRecebido?.ProcessStat?.InstanceId != null)
+                if (lastReceivedStats?.ProcessStat?.InstanceId != null)
                 {
-                    var removed = _rankingManager.Remove(ultimoStatsRecebido.ProcessStat.InstanceId);
+                    var removed = _rankingManager.Remove(lastReceivedStats.ProcessStat.InstanceId);
                     if (removed)
-                        Logger.LogInfo($"✅ Instance {ultimoStatsRecebido.ProcessStat.InstanceName} removida do ranking.");
+                        Logger.LogInfo($"✅ Instance {lastReceivedStats.ProcessStat.InstanceName} removed from ranking.");
                     else
-                        Logger.LogWarning($"⚠️ Falha ao remover: {ultimoStatsRecebido.ProcessStat.InstanceId} não encontrado no ranking.");
+                        Logger.LogWarning($"⚠️ Failed to remove: {lastReceivedStats.ProcessStat.InstanceId} not found in ranking.");
                 }
             }
         }
 
+        // Connects to the Traffic Manager and sends this instance's statistics periodically
         private async Task ExecuteConnectionAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -173,6 +164,7 @@ namespace Anakim.ProxyInstance
             }
         }
 
+        // Sends process and system statistics to the Traffic Manager continuously
         private async Task SendStatisticsPeriodically(CancellationToken stoppingToken)
         {
             try
@@ -186,7 +178,6 @@ namespace Anakim.ProxyInstance
                     var data = Encoding.UTF8.GetBytes(message);
 
                     await _stream.WriteAsync(data, stoppingToken);
-                    //Logger.LogInfo($"Statistics sent to Traffic Manager: {message}");
                     Logger.LogInfo($"Statistics sent to Traffic Manager: {statistics.ProcessStat.InstanceName}");
 
                     await Task.Delay(_proxySettings.TimeUpdate, stoppingToken);
@@ -199,6 +190,7 @@ namespace Anakim.ProxyInstance
             }
         }
 
+        // Deserializes and updates the ranking with the received statistics
         private NodeStatistics? ProcessStatistics(string jsonMessage)
         {
             try
@@ -210,14 +202,12 @@ namespace Anakim.ProxyInstance
                     return null;
                 }
 
-                //Logger.LogInfo($"Statistics received from AH: {JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true })}");
-
                 _rankingManager.Update(stats);
 
-                var melhor = _rankingManager.GetBestInstance();
-                if (melhor != null)
+                var best = _rankingManager.GetBestInstance();
+                if (best != null)
                 {
-                    Logger.LogInfo($"🟢 Melhor no ranking até agora: {melhor.ProcessStat.InstanceName} | CPU: {melhor.ProcessStat.CpuUsage} | Memória: {melhor.ProcessStat.PrivateMemoryMB}MB");
+                    Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
                 }
 
                 return stats;
@@ -229,11 +219,13 @@ namespace Anakim.ProxyInstance
             }
         }
 
+        // Exposes the best-ranked Application Handler to other components
         public NodeStatistics? GetBestApplicationHandler()
         {
             return _rankingManager.GetBestInstance();
         }
 
+        // Cleans up the connection to the Traffic Manager
         private void CleanupConnection()
         {
             _stream?.Close();
@@ -243,6 +235,7 @@ namespace Anakim.ProxyInstance
             Logger.LogWarning("Connection to Traffic Manager cleaned up.");
         }
 
+        // Called when the service is stopping
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             Logger.LogInfo("ProxyInstanceService is stopping...");
@@ -251,6 +244,7 @@ namespace Anakim.ProxyInstance
             await base.StopAsync(cancellationToken);
         }
 
+        // Sanitizes the statistics to prevent invalid negative values
         private void ValidateStatistics(NodeStatistics statistics)
         {
             if (statistics.ProcessStat.CpuUsage < 0)
@@ -263,6 +257,7 @@ namespace Anakim.ProxyInstance
                 statistics.System.TotalMemoryMB = 0;
         }
 
+        // Manual trigger to start connection to Traffic Manager
         public async Task ConnectToTrafficManager(CancellationToken stoppingToken)
         {
             Logger.LogInfo("Starting manual connection to Traffic Manager...");

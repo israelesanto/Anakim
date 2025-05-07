@@ -4,13 +4,15 @@ using Anakim.TrafficManager;
 
 namespace Anakim.Infrastructure
 {
+    // Background service that delegates execution to one of the core services (TM, PI, AH)
     public class WorkerService : BackgroundService
     {
         private readonly IHostedService _service;
 
+        // Constructor receives the actual service implementation via dependency injection
         public WorkerService(IHostedService service)
         {
-            // Validar se o serviço é suportado
+            // Validates if the provided service is supported
             if (service is not TrafficManagerService &&
                 service is not ProxyInstanceService &&
                 service is not ApplicationHandlerService)
@@ -21,10 +23,12 @@ namespace Anakim.Infrastructure
             _service = service;
         }
 
+        // This method runs when the host starts the service
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("WorkerService started.");
 
+            // Delegates execution based on actual service type
             switch (_service)
             {
                 case TrafficManagerService tmService:

@@ -5,57 +5,66 @@ using Microsoft.Extensions.Configuration;
 
 namespace Anakim.Infrastructure
 {
+    // Service responsible for collecting statistics about the current process and system
     public class NodeStatisticsService : INodeStatisticsService
     {
         private readonly IConfiguration _configuration;
         private readonly ProxySettings _proxySettings;
 
+        // Constructor that loads proxy settings from configuration
         public NodeStatisticsService(IConfiguration configuration)
         {
             _configuration = configuration;
-            _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>() ?? throw new InvalidOperationException("ProxySettings not configured.");
+            _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
+                ?? throw new InvalidOperationException("ProxySettings not configured.");
         }
 
+        // Gathers and returns statistics for this running instance
         public NodeStatistics CollectStatistics()
         {
             var generalPorts = _configuration.GetSection("GeneralPorts");
-            var process = Process.GetCurrentProcess();
+            var process = Process.GetCurrentProcess(); // Gets the current process
 
             return new NodeStatistics
             {
-                Timestamp = DateTime.UtcNow,
-                SenderIp = GetLocalIpAddress(),
+                Timestamp = DateTime.UtcNow, // Current timestamp
+                SenderIp = GetLocalIpAddress(), // IP of this machine
+
                 SenderPorts = new NodeStatistics.PortsInfo
                 {
-                    Api = _proxySettings.Port,
+                    Api = _proxySettings.Port, // Port used to receive stats (used by TM/PI)
                     Page = 0,
                     Socket = 0
                 },
+
                 Ports = new NodeStatistics.PortsInfo
                 {
-                    Api = generalPorts.GetValue<int>("PortApi"),
-                    Page = generalPorts.GetValue<int>("PortPage"),
-                    Socket = generalPorts.GetValue<int>("PortSocket")
+                    Api = generalPorts.GetValue<int>("PortApi"),   // API listening port
+                    Page = generalPorts.GetValue<int>("PortPage"), // Web page port
+                    Socket = generalPorts.GetValue<int>("PortSocket") // WebSocket port
                 },
+
                 ProcessStat = new NodeStatistics.ProcessStatistics
                 {
                     Name = "Proxy Instance",
-                    CpuUsage = Math.Round(GetCpuUsage(), 2),
-                    MemoryUsageMB = Math.Round(process.WorkingSet64 / (1024.0 * 1024.0), 2),
-                    PrivateMemoryMB = Math.Round(process.PrivateMemorySize64 / (1024.0 * 1024.0), 2),
-                    ActiveThreads = process.Threads.Count,
-                    InstanceId = _proxySettings.InstanceId,
-                    InstanceName = _proxySettings.InstanceName
+                    CpuUsage = Math.Round(GetCpuUsage(), 2), // CPU usage of current process
+                    MemoryUsageMB = Math.Round(process.WorkingSet64 / (1024.0 * 1024.0), 2), // RAM in use
+                    PrivateMemoryMB = Math.Round(process.PrivateMemorySize64 / (1024.0 * 1024.0), 2), // Private memory
+                    ActiveThreads = process.Threads.Count, // Number of threads in current process
+                    InstanceId = _proxySettings.InstanceId, // Unique ID of this node
+                    InstanceName = _proxySettings.InstanceName // Friendly name of this node
                 },
+
                 System = new NodeStatistics.SystemStatistics
                 {
-                    CpuUsage = Math.Round(GetSystemCpuUsage(), 2),
-                    MemoryAvailableMB = Math.Max(0, Math.Round(GetAvailableMemory(), 2)),
-                    TotalMemoryMB = Math.Max(0, Math.Round(GetTotalMemory(), 2))
+                    CpuUsage = Math.Round(GetSystemCpuUsage(), 2), // Total CPU usage on the machine
+                    MemoryAvailableMB = Math.Max(0, Math.Round(GetAvailableMemory(), 2)), // Free memory
+                    TotalMemoryMB = Math.Max(0, Math.Round(GetTotalMemory(), 2)) // Total heap size (GC)
                 }
             };
         }
 
+        // Tries to obtain a non-loopback IPv4 address of the current machine
         private string GetLocalIpAddress()
         {
             try
@@ -78,28 +87,32 @@ namespace Anakim.Infrastructure
             return "127.0.0.1";
         }
 
+        // Returns current process CPU usage percentage
         private double GetCpuUsage()
         {
             using var cpuCounter = new PerformanceCounter("Process", "% Processor Time", Process.GetCurrentProcess().ProcessName, true);
-            cpuCounter.NextValue();
-            System.Threading.Thread.Sleep(500);
+            cpuCounter.NextValue(); // Discard first sample
+            System.Threading.Thread.Sleep(500); // Wait for accurate value
             return cpuCounter.NextValue() / Environment.ProcessorCount;
         }
 
+        // Returns overall CPU usage of the system
         private double GetSystemCpuUsage()
         {
             using var systemCpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total", true);
-            systemCpuCounter.NextValue();
-            System.Threading.Thread.Sleep(500);
+            systemCpuCounter.NextValue(); // Discard first sample
+            System.Threading.Thread.Sleep(500); // Wait for second sample
             return systemCpuCounter.NextValue();
         }
 
+        // Returns estimated available memory based on .NET GC info
         private double GetAvailableMemory()
         {
             var gcMemory = GC.GetGCMemoryInfo();
             return gcMemory.TotalAvailableMemoryBytes / (1024.0 * 1024.0);
         }
 
+        // Returns total memory used by the heap (does not include all system memory)
         private double GetTotalMemory()
         {
             var gcMemory = GC.GetGCMemoryInfo();

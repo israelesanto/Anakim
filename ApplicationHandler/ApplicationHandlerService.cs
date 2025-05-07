@@ -8,6 +8,7 @@ using Microsoft.Extensions.Hosting;
 
 namespace Anakim.Infrastructure
 {
+    // Background service that runs the Application Handler role
     public class ApplicationHandlerService : BackgroundService
     {
         private readonly string _piHost;
@@ -20,29 +21,27 @@ namespace Anakim.Infrastructure
         private readonly INodeStatisticsService _nodeStatisticsService;
         private readonly ProxySettings _proxySettings;
 
-
         public ApplicationHandlerService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService)
         {
             _configuration = configuration;
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>();
 
-            // Acessa os dados do ProxyInstance
+            // Reads the Proxy Instance connection configuration
             var proxyInstanceSettings = configuration.GetSection("ProxySettings:ProxyInstance");
             _piHost = proxyInstanceSettings.GetValue<string>("Host");
             _piPort = proxyInstanceSettings.GetValue<int>("Port");
 
-            // Acessa os dados gerais do ProxySettings
-            //var proxySettings = configuration.GetSection("ProxySettings");
-            //_instanceId = _proxySettings.GetValue<string>("InstanceId");
-            //_instanceName = _proxySettings.GetValue<string>("InstanceName");
+            // Reads the local instance identifiers
             _instanceId = _proxySettings.InstanceId;
             _instanceName = _proxySettings.InstanceName;
 
+            // Validates Proxy Instance connection data
             if (string.IsNullOrEmpty(_piHost) || _piPort <= 0)
             {
                 throw new InvalidOperationException("Invalid Proxy Instance configuration in ProxySettings.");
             }
 
+            // Validates Instance identity
             if (string.IsNullOrEmpty(_instanceId) || string.IsNullOrEmpty(_instanceName))
             {
                 throw new InvalidOperationException("InstanceId or InstanceName is not configured in ProxySettings.");
@@ -51,18 +50,21 @@ namespace Anakim.Infrastructure
             _nodeStatisticsService = nodeStatisticsService ?? throw new ArgumentNullException(nameof(nodeStatisticsService));
         }
 
+        // Can be triggered manually to start connection (alternative entry point)
         public async Task ConnectToProxyInstance(CancellationToken stoppingToken)
         {
             Logger.LogInfo("Starting connection to Proxy Instance...");
             await ExecuteConnectionAsync(stoppingToken);
         }
 
+        // Default background service execution entry point
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("ApplicationHandlerService started.");
             await ExecuteConnectionAsync(stoppingToken);
         }
 
+        // Handles the connection and reconnection loop to the Proxy Instance
         private async Task ExecuteConnectionAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -76,17 +78,19 @@ namespace Anakim.Infrastructure
                     _stream = _client.GetStream();
                     Logger.LogSuccess("Connected to Proxy Instance!");
 
+                    // Begins sending statistics periodically
                     await SendStatisticsPeriodically(stoppingToken);
                 }
                 catch (Exception ex)
                 {
                     Logger.LogError($"Failed to connect to Proxy Instance: {ex.Message}");
                     CleanupConnection();
-                    await Task.Delay(5000, stoppingToken); // Retry connection after delay
+                    await Task.Delay(5000, stoppingToken); // Wait before retrying
                 }
             }
         }
 
+        // Sends system and process statistics in JSON format to the Proxy Instance
         private async Task SendStatisticsPeriodically(CancellationToken stoppingToken)
         {
             try
@@ -98,10 +102,10 @@ namespace Anakim.Infrastructure
                     var data = Encoding.UTF8.GetBytes(message);
 
                     await _stream.WriteAsync(data, stoppingToken);
-                    //Logger.LogInfo($"Statistics sent to Proxy Instance: {message}");
                     Logger.LogInfo($"Statistics sent to Proxy Instance: {statistics.ProcessStat.InstanceName}");
 
-                    await Task.Delay(_proxySettings.TimeUpdate, stoppingToken); // Send stats every 5 seconds
+                    // Wait based on configured interval (e.g., 5000 ms)
+                    await Task.Delay(_proxySettings.TimeUpdate, stoppingToken);
                 }
             }
             catch (Exception ex)
@@ -111,6 +115,7 @@ namespace Anakim.Infrastructure
             }
         }
 
+        // Not currently used, but would estimate CPU usage for a process
         private double GetProcessCpuUsage(Process process)
         {
             var totalProcessorTime = process.TotalProcessorTime.TotalMilliseconds;
@@ -118,6 +123,7 @@ namespace Anakim.Infrastructure
             return (totalProcessorTime / elapsedMilliseconds) * 100 / Environment.ProcessorCount;
         }
 
+        // Struct for querying system memory statistics (used with GlobalMemoryStatusEx)
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         private class MEMORYSTATUSEX
         {
@@ -132,9 +138,11 @@ namespace Anakim.Infrastructure
             public ulong ullAvailExtendedVirtual;
         }
 
+        // External Win32 API function to get memory usage
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
 
+        // Cleans up the TCP connection and network stream
         private void CleanupConnection()
         {
             _stream?.Close();
@@ -144,6 +152,7 @@ namespace Anakim.Infrastructure
             Logger.LogWarning("Connection to Proxy Instance cleaned up.");
         }
 
+        // Called when the service is stopping
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             Logger.LogInfo("ApplicationHandlerService is stopping...");
