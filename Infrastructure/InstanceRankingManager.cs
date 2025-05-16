@@ -12,7 +12,7 @@ namespace Anakim.Infrastructure
         // Internal class to store statistics along with last update timestamp
         private class TimedStat
         {
-            public NodeStatistics Statistics { get; set; }
+            public NodeStatistics? Statistics { get; set; }
             public DateTime LastUpdateUtc { get; set; }
         }
 
@@ -49,8 +49,10 @@ namespace Anakim.Infrastructure
             return _instances.Values
                 .Where(x => now - x.LastUpdateUtc <= _expirationTime) // Only recent updates
                 .Select(x => x.Statistics)
+                .OfType<NodeStatistics>()
+                .Where(x => x.ProcessStat != null)
                 .OrderBy(x =>
-                    (x.ProcessStat.CpuUsage * 0.0) +                     // CPU usage is currently ignored
+                    (x.ProcessStat!.CpuUsage * 0.0) +                     // CPU usage is currently ignored
                     (x.ProcessStat.PrivateMemoryMB * 1.0))              // Memory usage used for ranking
                 .FirstOrDefault();
         }
@@ -63,6 +65,8 @@ namespace Anakim.Infrastructure
             return _instances.Values
                 .Where(x => now - x.LastUpdateUtc <= _expirationTime) // Filter out stale stats
                 .Select(x => x.Statistics)
+                .Where(x => x != null)
+                .Cast<NodeStatistics>()
                 .ToList()
                 .AsReadOnly();
         }
@@ -76,10 +80,11 @@ namespace Anakim.Infrastructure
             return _instances.Values
                 .Where(x => now - x.LastUpdateUtc <= _expirationTime)
                 .Select(x => x.Statistics)
+                .Where(x => x != null && x.ProcessStat != null)
                 .OrderBy(x =>
-                    (x.ProcessStat.CpuUsage * 0.0) +                   // CPU usage can be reactivated later
-                    (x.ProcessStat.PrivateMemoryMB * 1.0))            // Memory is used as ranking metric
-                .ToList();
+                    (x!.ProcessStat!.CpuUsage * 0.0) +
+                    (x.ProcessStat.PrivateMemoryMB * 1.0))
+                .ToList()!;
         }
     }
 }

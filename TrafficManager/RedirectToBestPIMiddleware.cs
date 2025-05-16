@@ -2,23 +2,30 @@
 using Anakim.Infrastructure;
 using Anakim.ProxyInstance.Failover;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using System.Linq;
 
 namespace Anakim.TrafficManager
 {
-    // Middleware used by the Traffic Manager to forward requests to the best available Proxy Instance
+    // Middleware used by the Traffic Manager to redirect requests to the best available Proxy Instance
     public class RedirectToBestPIMiddleware
     {
         private readonly RequestDelegate _next;
         private readonly InstanceRankingManager _rankingManager;
         private readonly FailoverManager _failoverManager;
+        private readonly IConfiguration _configuration;
 
         // Constructor receives dependencies via Dependency Injection
-        public RedirectToBestPIMiddleware(RequestDelegate next, InstanceRankingManager rankingManager, FailoverManager failoverManager)
+        public RedirectToBestPIMiddleware(
+            RequestDelegate next,
+            InstanceRankingManager rankingManager,
+            FailoverManager failoverManager,
+            IConfiguration configuration)
         {
             _next = next;
             _rankingManager = rankingManager;
             _failoverManager = failoverManager;
+            _configuration = configuration;
         }
 
         // Middleware logic for handling and redirecting the request
@@ -36,64 +43,37 @@ namespace Anakim.TrafficManager
                 return;
             }
 
+            // Reads the HTTPS usage setting from configuration
+            bool useHttps = _configuration.GetValue<bool>("UseHttps");
+            var protocol = useHttps ? "https" : "http";
+
             // Converts statistics into failover handler list
             var handlerList = rankedInstances.Select(pi => new ApplicationHandlerInfo
             {
-                InstanceId = pi.ProcessStat.InstanceId,
-                Url = $"https://{pi.SenderIp}:{pi.Ports.Api}", // Target URL of Proxy Instance
-                Ranking = pi.ProcessStat.PrivateMemoryMB // Ranking logic (can be customized)
+                InstanceId = pi.ProcessStat?.InstanceId ?? "unknow",
+                Url = $"{protocol}://{pi.SenderIp}:{pi.Ports?.Api ?? 0}",
+                Ranking = pi.ProcessStat?.PrivateMemoryMB ?? 0
             }).ToList();
 
             // Updates internal handler list used by FailoverManager
             _failoverManager.UpdateHandlers(handlerList);
 
-            // Converts current HTTP request into HttpRequestMessage
-            var requestMessage = CreateHttpRequestFromContext(context);
-
-            try
+            // Gets the best Proxy Instance from the ranking
+            var bestInstance = rankedInstances.First();
+            if (bestInstance == null || bestInstance.Ports != null)
             {
-                // Tries to forward using failover logic
-                var responseMessage = await _failoverManager.ForwardWithFailover(requestMessage);
-
-                // Copies status code and headers from response
-                context.Response.StatusCode = (int)responseMessage.StatusCode;
-
-                foreach (var header in responseMessage.Headers)
-                    context.Response.Headers[header.Key] = header.Value.ToArray();
-
-                foreach (var header in responseMessage.Content.Headers)
-                    context.Response.Headers[header.Key] = header.Value.ToArray();
-
-                // Forwards the body content to the original requester
-                await responseMessage.Content.CopyToAsync(context.Response.Body);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Error forwarding to Proxy Instance with failover: {ex.Message}");
-                context.Response.StatusCode = 502; // Bad Gateway
-                await context.Response.WriteAsync("Error redirecting to Proxy Instance.");
-            }
-        }
-
-        // Converts HttpContext to HttpRequestMessage for outbound forwarding
-        private HttpRequestMessage CreateHttpRequestFromContext(HttpContext context)
-        {
-            var placeholderUrl = "http://placeholder"; // Will be replaced by the FailoverManager
-            var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), placeholderUrl);
-
-            // Copies request body for methods that support it
-            if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
-            {
-                request.Content = new StreamContent(context.Request.Body);
+                Logger.LogInfo("bestInstance or its bestInstance.Ports is null.");
+                return;
             }
 
-            // Copies all headers
-            foreach (var header in context.Request.Headers)
-            {
-                request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
-            }
+            // Constructs the target URL by preserving the path and query string
+            var targetUrl = $"{protocol}://{bestInstance.SenderIp}:{bestInstance.Ports!.Api}{context.Request.Path}{context.Request.QueryString}";
 
-            return request;
+            Logger.LogInfo($"Redirecting request to: {targetUrl}");
+
+            // Performs an HTTP redirect to the selected Proxy Instance
+            context.Response.StatusCode = StatusCodes.Status302Found; // Use 307 if you want to preserve the method (e.g., for POST)
+            context.Response.Headers["Location"] = targetUrl;
         }
     }
 }

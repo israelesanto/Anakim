@@ -15,8 +15,8 @@ namespace Anakim.Infrastructure
         private readonly int _piPort;
         private readonly string _instanceId;
         private readonly string _instanceName;
-        private TcpClient _client;
-        private NetworkStream _stream;
+        private TcpClient? _client;
+        private NetworkStream? _stream;
         private readonly IConfiguration _configuration;
         private readonly INodeStatisticsService _nodeStatisticsService;
         private readonly ProxySettings _proxySettings;
@@ -24,31 +24,29 @@ namespace Anakim.Infrastructure
         public ApplicationHandlerService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService)
         {
             _configuration = configuration;
-            _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>();
 
-            // Reads the Proxy Instance connection configuration
+            _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
+                ?? throw new InvalidOperationException("The 'ProxySettings' section is missing or malformed in appsettings.json.");
+
             var proxyInstanceSettings = configuration.GetSection("ProxySettings:ProxyInstance");
-            _piHost = proxyInstanceSettings.GetValue<string>("Host");
+
+            _piHost = proxyInstanceSettings.GetValue<string>("Host")
+                ?? throw new InvalidOperationException("The 'Host' section is missing or malformed in appsettings.json.");
+
             _piPort = proxyInstanceSettings.GetValue<int>("Port");
 
-            // Reads the local instance identifiers
-            _instanceId = _proxySettings.InstanceId;
-            _instanceName = _proxySettings.InstanceName;
+            _instanceId = _proxySettings.InstanceId ?? "unknown";
+            _instanceName = _proxySettings.InstanceName ?? "unknown";
 
-            // Validates Proxy Instance connection data
             if (string.IsNullOrEmpty(_piHost) || _piPort <= 0)
-            {
                 throw new InvalidOperationException("Invalid Proxy Instance configuration in ProxySettings.");
-            }
 
-            // Validates Instance identity
             if (string.IsNullOrEmpty(_instanceId) || string.IsNullOrEmpty(_instanceName))
-            {
                 throw new InvalidOperationException("InstanceId or InstanceName is not configured in ProxySettings.");
-            }
 
             _nodeStatisticsService = nodeStatisticsService ?? throw new ArgumentNullException(nameof(nodeStatisticsService));
         }
+
 
         // Can be triggered manually to start connection (alternative entry point)
         public async Task ConnectToProxyInstance(CancellationToken stoppingToken)
@@ -100,6 +98,18 @@ namespace Anakim.Infrastructure
                     var statistics = _nodeStatisticsService.CollectStatistics();
                     var message = JsonSerializer.Serialize(statistics);
                     var data = Encoding.UTF8.GetBytes(message);
+
+                    if (statistics.ProcessStat is null)
+                    {
+                        Logger.LogError("statistics.ProcessStat is not initialized.");
+                        return;
+                    }
+
+                    if (_stream is null)
+                    {
+                        Logger.LogError("Network stream is not initialized.");
+                        return;
+                    }
 
                     await _stream.WriteAsync(data, stoppingToken);
                     Logger.LogInfo($"Statistics sent to Proxy Instance: {statistics.ProcessStat.InstanceName}");

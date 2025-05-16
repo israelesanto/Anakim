@@ -8,7 +8,7 @@ namespace Anakim.TrafficManager
 {
     public class TrafficManagerConfig
     {
-        public string Host { get; set; }
+        public string Host { get; set; } = string.Empty;
         public int Port { get; set; }
     }
 }

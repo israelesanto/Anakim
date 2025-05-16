@@ -12,7 +12,7 @@ namespace Anakim.TrafficManager
     public class TrafficManagerService : IHostedService
     {
         private readonly IConfiguration _configuration;
-        private TcpListener _listener;
+        private TcpListener? _listener;
         private int _port;
         private readonly InstanceRankingManager _rankingManager = new();
 
@@ -71,6 +71,12 @@ namespace Anakim.TrafficManager
                 var remote = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
                 Logger.LogInfo($"Connection established with {remote}");
 
+                if (client is null)
+                {
+                    Logger.LogError("TcpClient é nulo. Encerrando execução.");
+                    return;
+                }
+
                 var stream = client.GetStream();
                 var buffer = new byte[2048];
 
@@ -86,8 +92,14 @@ namespace Anakim.TrafficManager
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     var stats = JsonSerializer.Deserialize<NodeStatistics>(message);
 
+                    if (stats?.ProcessStat == null)
+                    {
+                        Logger.LogInfo("Statistics or its ProcessStat is null.");
+                        return;
+                    }
+
                     // If valid statistics were received
-                    if (stats != null && !string.IsNullOrEmpty(stats.ProcessStat?.InstanceId))
+                    if (stats != null && !string.IsNullOrEmpty(stats.ProcessStat.InstanceId))
                     {
                         lastStats = stats;
                         _rankingManager.Update(stats);
@@ -95,7 +107,7 @@ namespace Anakim.TrafficManager
                         Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
 
                         var best = _rankingManager.GetBestInstance();
-                        if (best != null)
+                        if (best?.ProcessStat != null)
                         {
                             Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
                         }

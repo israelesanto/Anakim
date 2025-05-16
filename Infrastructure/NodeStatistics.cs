@@ -8,8 +8,12 @@ namespace Anakim.Infrastructure
 {
     public class NodeStatistics
     {
-        public string SenderIp { get; set; } // IP de quem enviou as estatísticas
-        public PortsInfo SenderPorts { get; set; } // Portas de quem enviou as estatísticas
+        public string? SenderIp { get; set; } // IP de quem enviou as estatísticas
+        public PortsInfo? SenderPorts { get; set; } // Portas de quem enviou as estatísticas
+        public DateTime Timestamp { get; set; }
+        public ProcessStatistics? ProcessStat { get; set; }
+        public SystemStatistics? System { get; set; }
+        public PortsInfo? Ports { get; set; }
 
         public class PortsInfo
         {
@@ -20,13 +24,13 @@ namespace Anakim.Infrastructure
 
         public class ProcessStatistics
         {
-            public string Name { get; set; }
+            public string? Name { get; set; }
             public double CpuUsage { get; set; }
             public double MemoryUsageMB { get; set; }
             public double PrivateMemoryMB { get; set; }
             public int ActiveThreads { get; set; }
-            public string InstanceId { get; set; }
-            public string InstanceName { get; set; }
+            public string InstanceId { get; set; } = string.Empty;
+            public string? InstanceName { get; set; }
         }
 
         public class SystemStatistics
@@ -35,10 +39,5 @@ namespace Anakim.Infrastructure
             public double MemoryAvailableMB { get; set; }
             public double TotalMemoryMB { get; set; }
         }
-
-        public DateTime Timestamp { get; set; }
-        public ProcessStatistics ProcessStat { get; set; }
-        public SystemStatistics System { get; set; }
-        public PortsInfo Ports { get; set; }
     }
 }

@@ -15,17 +15,16 @@ namespace Anakim.ProxyInstance
         private readonly string _tmHost;
         private readonly int _tmPort;
         private readonly int _piPort;
-        private TcpClient _client;
-        private NetworkStream _stream;
+        private TcpClient? _client;
+        private NetworkStream? _stream;
         private TcpListener _listener;
-        private readonly IConfiguration _configuration;
         private readonly ProxySettings _proxySettings;
         private readonly INodeStatisticsService _nodeStatisticsService;
         private readonly InstanceRankingManager _rankingManager = new();
 
         public ProxyInstanceService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService, InstanceRankingManager rankingManager)
         {
-            _configuration = configuration;
+            _listener = new TcpListener(IPAddress.Any, _piPort);
             _rankingManager = rankingManager;
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                 ?? throw new InvalidOperationException("ProxySettings is not configured properly in appsettings.json.");
@@ -35,7 +34,7 @@ namespace Anakim.ProxyInstance
                 throw new InvalidOperationException("Invalid Proxy Instance port configuration.");
 
             var tmSettings = configuration.GetSection("ProxySettings:TrafficManager");
-            _tmHost = tmSettings.GetValue<string>("Host");
+            _tmHost = tmSettings.GetValue<string>("Host") ?? throw new InvalidOperationException("Traffic Manager host is missing in configuration.");
             _tmPort = tmSettings.GetValue<int>("Port");
 
             if (string.IsNullOrEmpty(_tmHost) || _tmPort <= 0)
@@ -60,7 +59,7 @@ namespace Anakim.ProxyInstance
                 _listener = new TcpListener(IPAddress.Any, _piPort);
                 _listener.Start();
                 Logger.LogSuccess($"Proxy Instance listening on port {_piPort} for Application Handlers.");
-                Task.Run(() => AcceptClientsAsync(stoppingToken));
+                Task.Run(() => AcceptClientsAsync(stoppingToken), stoppingToken);
             }
             catch (Exception ex)
             {
@@ -99,6 +98,12 @@ namespace Anakim.ProxyInstance
             {
                 var remoteInfo = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
                 Logger.LogInfo($"Application Handler connected: {remoteInfo}");
+
+                if (client is null)
+                {
+                    Logger.LogError("TcpClient é nulo. Encerrando execução.");
+                    return;
+                }
 
                 var stream = client.GetStream();
                 var buffer = new byte[2048];
@@ -172,10 +177,22 @@ namespace Anakim.ProxyInstance
                 while (!stoppingToken.IsCancellationRequested)
                 {
                     var statistics = _nodeStatisticsService.CollectStatistics();
+                    if (statistics.ProcessStat is null)
+                    {
+                        Logger.LogError("statistics.ProcessStat is null.");
+                        return;
+                    }
+
                     ValidateStatistics(statistics);
 
                     var message = JsonSerializer.Serialize(statistics);
                     var data = Encoding.UTF8.GetBytes(message);
+
+                    if (_stream is null)
+                    {
+                        Logger.LogError("Stram is null.");
+                        return;
+                    }
 
                     await _stream.WriteAsync(data, stoppingToken);
                     Logger.LogInfo($"Statistics sent to Traffic Manager: {statistics.ProcessStat.InstanceName}");
@@ -205,6 +222,19 @@ namespace Anakim.ProxyInstance
                 _rankingManager.Update(stats);
 
                 var best = _rankingManager.GetBestInstance();
+
+                if (best == null)
+                {
+                    Logger.LogInfo("The 'best' object is null");
+                    return null;
+                }
+
+                if (best.ProcessStat == null)
+                {
+                    Logger.LogInfo("The 'best.ProcessStat' object is null");
+                    return null;
+                }
+
                 if (best != null)
                 {
                     Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
@@ -245,8 +275,20 @@ namespace Anakim.ProxyInstance
         }
 
         // Sanitizes the statistics to prevent invalid negative values
-        private void ValidateStatistics(NodeStatistics statistics)
+        private static void ValidateStatistics(NodeStatistics statistics)
         {
+            if (statistics.ProcessStat == null)
+            {
+                Logger.LogInfo("The 'statistics.ProcessStat' object is null");
+                return;
+            }
+
+            if (statistics.System == null)
+            {
+                Logger.LogInfo("The 'statistics.System' object is null");
+                return;
+            }
+
             if (statistics.ProcessStat.CpuUsage < 0)
                 statistics.ProcessStat.CpuUsage = 0;
 

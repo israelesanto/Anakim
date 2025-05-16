@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Anakim.Infrastructure;
 using Anakim.ProxyInstance.Failover;
 
@@ -10,13 +11,19 @@ namespace Anakim.ProxyInstance
         private readonly RequestDelegate _next;
         private readonly InstanceRankingManager _rankingManager;
         private readonly FailoverManager _failoverManager;
+        private readonly IConfiguration _configuration;
 
         // Constructor receives dependencies via DI
-        public RedirectToBestAHMiddleware(RequestDelegate next, InstanceRankingManager rankingManager, FailoverManager failoverManager)
+        public RedirectToBestAHMiddleware(
+            RequestDelegate next,
+            InstanceRankingManager rankingManager,
+            FailoverManager failoverManager,
+            IConfiguration configuration)
         {
             _next = next;
             _rankingManager = rankingManager;
             _failoverManager = failoverManager;
+            _configuration = configuration;
         }
 
         // Middleware execution logic
@@ -24,7 +31,6 @@ namespace Anakim.ProxyInstance
         {
             Logger.LogInfo($"Request received on Host: {context.Request.Host.Host}");
 
-            // Gets ranked AH instances from in-memory ranking manager
             var rankedInstances = _rankingManager.GetRankedInstances();
 
             if (!rankedInstances.Any())
@@ -34,25 +40,38 @@ namespace Anakim.ProxyInstance
                 return;
             }
 
-            // Converts statistics into a list of ApplicationHandlerInfo for the FailoverManager
-            var handlerList = rankedInstances.Select(ah => new ApplicationHandlerInfo
+            // Reads the protocol from configuration
+            bool useHttps = _configuration.GetValue<bool>("UseHttps");
+            string protocol = useHttps ? "https" : "http";
+
+            /*
+            // Builds the list of handler URLs
+            var handlerList = rankedInstances
+                .Select(ah => new ApplicationHandlerInfo
             {
                 InstanceId = ah.ProcessStat.InstanceId,
-                Url = $"https://{ah.SenderIp}:{ah.Ports.Api}", // Constructs forwarding URL
-                Ranking = ah.ProcessStat.PrivateMemoryMB // Ranking metric (you can adjust logic here)
+                Url = $"{protocol}://{ah.SenderIp}:{ah.Ports.Api}",
+                Ranking = ah.ProcessStat.PrivateMemoryMB
             }).ToList();
+            */
 
-            _failoverManager.UpdateHandlers(handlerList); // Updates internal state of failover manager
+            // Builds the list of handler URLs
+            var handlerList = rankedInstances
+                .Select(ah => new ApplicationHandlerInfo
+                {
+                    InstanceId = ah.ProcessStat?.InstanceId ?? "unknow",
+                    Url = $"{protocol}://{ah.SenderIp}:{ah.Ports?.Api ?? 0}",
+                    Ranking = ah.ProcessStat?.PrivateMemoryMB ?? 0
+                }).ToList();
 
-            // Creates an HttpRequestMessage from the current context
+            _failoverManager.UpdateHandlers(handlerList);
+
             var requestMessage = CreateHttpRequestFromContext(context);
 
             try
             {
-                // Attempts to forward the request with failover handling
                 var responseMessage = await _failoverManager.ForwardWithFailover(requestMessage);
 
-                // Copies response status and headers to the client response
                 context.Response.StatusCode = (int)responseMessage.StatusCode;
 
                 foreach (var header in responseMessage.Headers)
@@ -61,7 +80,6 @@ namespace Anakim.ProxyInstance
                 foreach (var header in responseMessage.Content.Headers)
                     context.Response.Headers[header.Key] = header.Value.ToArray();
 
-                // Copies the response body
                 await responseMessage.Content.CopyToAsync(context.Response.Body);
             }
             catch (Exception ex)
@@ -78,13 +96,11 @@ namespace Anakim.ProxyInstance
             var placeholderUrl = "http://placeholder"; // Will be replaced by FailoverManager
             var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), placeholderUrl);
 
-            // Only copy body for methods that allow it
             if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
             {
                 request.Content = new StreamContent(context.Request.Body);
             }
 
-            // Copy all request headers
             foreach (var header in context.Request.Headers)
             {
                 request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());

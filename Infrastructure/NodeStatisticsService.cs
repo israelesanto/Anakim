@@ -51,8 +51,8 @@ namespace Anakim.Infrastructure
                     MemoryUsageMB = Math.Round(process.WorkingSet64 / (1024.0 * 1024.0), 2), // RAM in use
                     PrivateMemoryMB = Math.Round(process.PrivateMemorySize64 / (1024.0 * 1024.0), 2), // Private memory
                     ActiveThreads = process.Threads.Count, // Number of threads in current process
-                    InstanceId = _proxySettings.InstanceId, // Unique ID of this node
-                    InstanceName = _proxySettings.InstanceName // Friendly name of this node
+                    InstanceId = _proxySettings?.InstanceId ?? "unknow", // Unique ID of this node
+                    InstanceName = _proxySettings?.InstanceName ?? "unknow" // Friendly name of this node
                 },
 
                 System = new NodeStatistics.SystemStatistics
@@ -90,19 +90,39 @@ namespace Anakim.Infrastructure
         // Returns current process CPU usage percentage
         private double GetCpuUsage()
         {
-            using var cpuCounter = new PerformanceCounter("Process", "% Processor Time", Process.GetCurrentProcess().ProcessName, true);
-            cpuCounter.NextValue(); // Discard first sample
-            System.Threading.Thread.Sleep(500); // Wait for accurate value
-            return cpuCounter.NextValue() / Environment.ProcessorCount;
+            var process = Process.GetCurrentProcess();
+            var startCpuTime = process.TotalProcessorTime;
+            var startTime = DateTime.UtcNow;
+
+            System.Threading.Thread.Sleep(500);
+
+            var endCpuTime = process.TotalProcessorTime;
+            var endTime = DateTime.UtcNow;
+
+            var cpuUsedMs = (endCpuTime - startCpuTime).TotalMilliseconds;
+            var elapsedMs = (endTime - startTime).TotalMilliseconds;
+            var cpuUsageTotal = cpuUsedMs / (elapsedMs * Environment.ProcessorCount);
+
+            return Math.Round(cpuUsageTotal * 100, 2);
         }
 
         // Returns overall CPU usage of the system
         private double GetSystemCpuUsage()
         {
-            using var systemCpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total", true);
-            systemCpuCounter.NextValue(); // Discard first sample
-            System.Threading.Thread.Sleep(500); // Wait for second sample
-            return systemCpuCounter.NextValue();
+            var process = Process.GetCurrentProcess();
+            var startCpuTime = process.TotalProcessorTime;
+            var startTime = DateTime.UtcNow;
+
+            System.Threading.Thread.Sleep(500);
+
+            var endCpuTime = process.TotalProcessorTime;
+            var endTime = DateTime.UtcNow;
+
+            var cpuUsedMs = (endCpuTime - startCpuTime).TotalMilliseconds;
+            var elapsedMs = (endTime - startTime).TotalMilliseconds;
+            var cpuUsageTotal = cpuUsedMs / (elapsedMs * Environment.ProcessorCount);
+
+            return Math.Round(cpuUsageTotal * 100, 2);
         }
 
         // Returns estimated available memory based on .NET GC info

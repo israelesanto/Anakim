@@ -13,19 +13,19 @@ namespace Anakim.Infrastructure
     public static class Logger
     {
         // Queue to store log messages in memory (thread-safe)
-        private static BlockingCollection<string> _logQueue = new();
+        private static readonly BlockingCollection<string> _logQueue = new();
 
         // Background task for writing logs to file
-        private static Task _logWriterTask;
+        private static Task? _logWriterTask;
 
         // Token to control cancellation of background logging
-        private static CancellationTokenSource _cancellationTokenSource = new();
+        private static readonly CancellationTokenSource _cancellationTokenSource = new();
 
         // File logging settings
         private static bool _enableFileLogging;
-        private static string _logDirectory;
+        private static string? _logDirectory;
         private static long _maxFileSizeInMb;
-        private static string _currentLogFilePath;
+        private static string? _currentLogFilePath;
 
         // Lock object for file access to prevent race conditions
         private static readonly object _fileLock = new();
@@ -33,7 +33,14 @@ namespace Anakim.Infrastructure
         // Initializes logger from app configuration (e.g., appsettings.json)
         public static void Initialize(IConfiguration configuration)
         {
-            var logConfig = configuration.GetSection("WriteLog").Get<WriteLogConfig>();
+            var logConfig = configuration.GetSection("WriteLog").Get<WriteLogConfig>()
+                ?? throw new InvalidOperationException("A seção 'WriteLog' está ausente ou malformada no appsettings.json.");
+
+
+            if (string.IsNullOrWhiteSpace(logConfig.Path))
+            {
+                throw new InvalidOperationException("O caminho de log (WriteLog:Path) não foi informado.");
+            }
 
             _enableFileLogging = logConfig.Enable;
             _logDirectory = logConfig.Path;
@@ -49,6 +56,10 @@ namespace Anakim.Infrastructure
         // Ensures that the logging directory exists on disk
         private static void EnsureLogDirectoryExists()
         {
+            if (_logDirectory is null)
+                throw new InvalidOperationException("A seção 'WriteLog' está ausente ou malformada no appsettings.json.");
+            
+
             if (!Directory.Exists(_logDirectory))
             {
                 Directory.CreateDirectory(_logDirectory);
@@ -107,6 +118,9 @@ namespace Anakim.Infrastructure
         // Generates a new file name with timestamp
         private static string GenerateNewLogFilePath()
         {
+            if (_logDirectory is null)
+                throw new InvalidOperationException("A seção 'WriteLog' está ausente ou malformada no appsettings.json.");
+
             var timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
             return Path.Combine(_logDirectory, $"log_{timestamp}.log");
         }
@@ -149,15 +163,16 @@ namespace Anakim.Infrastructure
         public static void Stop()
         {
             _cancellationTokenSource.Cancel();
-            _logWriterTask.Wait();
+            _logWriterTask?.Wait();
             _logQueue.Dispose();
         }
+
 
         // Internal class to map logging settings from configuration
         private class WriteLogConfig
         {
             public bool Enable { get; set; }
-            public string Path { get; set; }
+            public string? Path { get; set; } 
             public long SizeMax { get; set; }
         }
 

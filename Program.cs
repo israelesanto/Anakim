@@ -50,7 +50,9 @@ class Program
                     {
                         // Loads certificate settings for HTTPS
                         var certSettings = configuration.GetSection("Certificate");
-                        var certPath = certSettings.GetValue<string>("Path");
+                        var certPath = certSettings.GetValue<string>("Path")
+                            ?? throw new InvalidOperationException("Missing 'Certificate:Path' in appsettings.json.");
+
                         var certPassword = certSettings.GetValue<string>("Password");
                         var certificate = new X509Certificate2(certPath, certPassword);
 
@@ -72,6 +74,11 @@ class Program
                     // Gets ProxySettings from DI
                     var config = app.ApplicationServices.GetRequiredService<IConfiguration>();
                     var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>();
+
+                    if (proxySettings is null)
+                    {
+                        throw new InvalidOperationException("Configuração 'ProxySettings' não encontrada ou inválida.");
+                    }
 
                     app.UseRouting(); // Enables routing middleware
 
