@@ -48,10 +48,8 @@ namespace Anakim.ProxyInstance.Failover
 
             while (true)
             {
-                var candidate = SelectBestAvailableHandler();
-
-                if (candidate == null)
-                    throw new Exception("No Application Handler available for forwarding.");
+                var candidate = SelectBestAvailableHandler()
+                    ?? throw new Exception("No Application Handler available for forwarding.");
 
                 if (tried.Contains(candidate.InstanceId))
                     throw new Exception("All Application Handlers failed.");

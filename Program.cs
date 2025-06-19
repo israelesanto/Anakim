@@ -16,19 +16,16 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        // Creates and configures the host builder
         var builder = Host.CreateDefaultBuilder(args)
-            .UseWindowsService() // Enables execution as a Windows Service
+            .UseWindowsService()
             .ConfigureAppConfiguration((hostingContext, config) =>
             {
-                // Loads appsettings.json and environment variables
                 config.SetBasePath(AppContext.BaseDirectory)
                       .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
                       .AddEnvironmentVariables();
             })
             .ConfigureLogging(logging =>
             {
-                // Configures console logging only
                 logging.ClearProviders();
                 logging.AddConsole();
             })
@@ -36,66 +33,45 @@ class Program
             {
                 webBuilder.ConfigureKestrel((context, options) =>
                 {
-                    // Load configuration values
                     var configuration = context.Configuration;
                     var useHttps = configuration.GetValue<bool>("UseHttps");
-                    var generalPorts = configuration.GetSection("GeneralPorts");
-
-                    // Reads configured ports
-                    var portApi = generalPorts.GetValue<int>("PortApi");
-                    var portPage = generalPorts.GetValue<int>("PortPage");
-                    var portSocket = generalPorts.GetValue<int>("PortSocket");
+                    var port = configuration.GetValue<int>("GeneralPort");
 
                     if (useHttps)
                     {
-                        // Loads certificate settings for HTTPS
                         var certSettings = configuration.GetSection("Certificate");
                         var certPath = certSettings.GetValue<string>("Path")
                             ?? throw new InvalidOperationException("Missing 'Certificate:Path' in appsettings.json.");
-
                         var certPassword = certSettings.GetValue<string>("Password");
                         var certificate = new X509Certificate2(certPath, certPassword);
 
-                        // Configures HTTPS listeners for all three ports
-                        options.ListenAnyIP(portApi, listenOptions => listenOptions.UseHttps(certificate));
-                        options.ListenAnyIP(portPage, listenOptions => listenOptions.UseHttps(certificate));
-                        options.ListenAnyIP(portSocket, listenOptions => listenOptions.UseHttps(certificate));
+                        options.ListenAnyIP(port, listenOptions => listenOptions.UseHttps(certificate));
                     }
                     else
                     {
-                        // Configures HTTP listeners as fallback
-                        options.ListenAnyIP(portApi);
-                        options.ListenAnyIP(portPage);
-                        options.ListenAnyIP(portSocket);
+                        options.ListenAnyIP(port);
                     }
                 })
                 .Configure(app =>
                 {
-                    // Gets ProxySettings from DI
                     var config = app.ApplicationServices.GetRequiredService<IConfiguration>();
-                    var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>();
+                    var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>()
+                        ?? throw new InvalidOperationException("Configuração 'ProxySettings' não encontrada ou inválida.");
 
-                    if (proxySettings is null)
-                    {
-                        throw new InvalidOperationException("Configuração 'ProxySettings' não encontrada ou inválida.");
-                    }
+                    app.UseRouting();
 
-                    app.UseRouting(); // Enables routing middleware
-
-                    // Middleware registration depending on running mode
                     switch (proxySettings.Mode)
                     {
-                        case 1: // Traffic Manager
+                        case 1:
                             app.UseMiddleware<RedirectToBestPIMiddleware>();
                             break;
-                        case 2: // Proxy Instance
+                        case 2:
                             app.UseMiddleware<RedirectToBestAHMiddleware>();
                             break;
-                        case 3: // Application Handler (no redirect middleware)
+                        case 3:
                             break;
                     }
 
-                    // Default endpoint for diagnostics
                     app.UseEndpoints(endpoints =>
                     {
                         endpoints.MapGet("/", async context =>
@@ -115,7 +91,6 @@ class Program
                                 activeThrPoolcount = threadPoolcount
                             };
 
-                            // Sends JSON response
                             var json = JsonSerializer.Serialize(response);
                             var jsonBytes = Encoding.UTF8.GetBytes(json);
 
@@ -131,20 +106,16 @@ class Program
             })
             .ConfigureServices((hostingContext, services) =>
             {
-                // Reads configuration
                 var configuration = hostingContext.Configuration;
-                Logger.Initialize(configuration); // Initializes logging system
+                Logger.Initialize(configuration);
 
-                // Gets ProxySettings object
                 var proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                     ?? throw new InvalidOperationException("ProxySettings not configured properly.");
 
-                // Registers dependencies
                 services.AddSingleton(proxySettings);
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
                 services.AddSingleton<InstanceRankingManager>();
 
-                // Registers hosted services based on mode
                 switch (proxySettings.Mode)
                 {
                     case 1:
@@ -167,20 +138,17 @@ class Program
             })
             .Build();
 
-        // Starts the application
         Logger.LogSuccess("Application initialized successfully!");
         await builder.RunAsync();
     }
 }
 
-// Optional background worker with dynamic service resolution
 public class WorkerService : BackgroundService
 {
     private readonly IHostedService _service;
 
     public WorkerService(IEnumerable<IHostedService> services)
     {
-        // Selects the appropriate service implementation
         _service = services.FirstOrDefault(s =>
             s is TrafficManagerService || s is ProxyInstanceService || s is ApplicationHandlerService)
             ?? throw new InvalidOperationException("No valid service found.");
@@ -190,7 +158,6 @@ public class WorkerService : BackgroundService
     {
         Logger.LogInfo("WorkerService started.");
 
-        // Executes the corresponding logic for the resolved service
         switch (_service)
         {
             case TrafficManagerService tmService:

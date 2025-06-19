@@ -60,7 +60,7 @@ namespace Anakim.TrafficManager
 
             // Gets the best Proxy Instance from the ranking
             var bestInstance = rankedInstances.First();
-            if (bestInstance == null || bestInstance.Ports != null)
+            if (bestInstance == null || bestInstance.Ports == null)
             {
                 Logger.LogInfo("bestInstance or its bestInstance.Ports is null.");
                 return;

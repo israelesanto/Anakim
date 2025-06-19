@@ -13,7 +13,7 @@ namespace Anakim.TrafficManager
     {
         private readonly IConfiguration _configuration;
         private TcpListener? _listener;
-        private int _port;
+        private readonly int _port;
         private readonly InstanceRankingManager _rankingManager = new();
 
         // Constructor validates configuration and sets up port and ranking manager
