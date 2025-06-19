@@ -9,17 +9,15 @@ namespace Anakim.Infrastructure
     public class NodeStatistics
     {
         public string? SenderIp { get; set; } // IP de quem enviou as estatísticas
-        public PortsInfo? SenderPorts { get; set; } // Portas de quem enviou as estatísticas
+        public PortsInfo? SenderPort { get; set; } // Porta de quem enviou as estatísticas
         public DateTime Timestamp { get; set; }
         public ProcessStatistics? ProcessStat { get; set; }
         public SystemStatistics? System { get; set; }
-        public PortsInfo? Ports { get; set; }
+        public PortsInfo? Port { get; set; }
 
         public class PortsInfo
         {
-            public int Api { get; set; }
-            public int Page { get; set; }
-            public int Socket { get; set; }
+            public int GeneralPort { get; set; }
         }
 
         public class ProcessStatistics

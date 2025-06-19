@@ -1,6 +1,5 @@
 ﻿using System.Net.Http;
 using Anakim.Infrastructure;
-using Anakim.ProxyInstance.Failover;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using System.Linq;
@@ -51,7 +50,7 @@ namespace Anakim.TrafficManager
             var handlerList = rankedInstances.Select(pi => new ApplicationHandlerInfo
             {
                 InstanceId = pi.ProcessStat?.InstanceId ?? "unknow",
-                Url = $"{protocol}://{pi.SenderIp}:{pi.Ports?.Api ?? 0}",
+                Url = $"{protocol}://{pi.SenderIp}:{pi.Port?.GeneralPort ?? 0}",
                 Ranking = pi.ProcessStat?.PrivateMemoryMB ?? 0
             }).ToList();
 
@@ -60,14 +59,14 @@ namespace Anakim.TrafficManager
 
             // Gets the best Proxy Instance from the ranking
             var bestInstance = rankedInstances.First();
-            if (bestInstance == null || bestInstance.Ports == null)
+            if (bestInstance == null || bestInstance.Port?.GeneralPort == null)
             {
                 Logger.LogInfo("bestInstance or its bestInstance.Ports is null.");
                 return;
             }
 
             // Constructs the target URL by preserving the path and query string
-            var targetUrl = $"{protocol}://{bestInstance.SenderIp}:{bestInstance.Ports!.Api}{context.Request.Path}{context.Request.QueryString}";
+            var targetUrl = $"{protocol}://{bestInstance.SenderIp}:{bestInstance.Port?.GeneralPort}{context.Request.Path}{context.Request.QueryString}";
 
             Logger.LogInfo($"Redirecting request to: {targetUrl}");
 

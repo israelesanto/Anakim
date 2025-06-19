@@ -6,7 +6,6 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Anakim.Infrastructure;
 using Anakim.ProxyInstance;
-using Anakim.ProxyInstance.Failover;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;

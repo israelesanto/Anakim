@@ -1,7 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Anakim.Infrastructure;
-using Anakim.ProxyInstance.Failover;
 
 namespace Anakim.ProxyInstance
 {
@@ -60,7 +59,7 @@ namespace Anakim.ProxyInstance
                 .Select(ah => new ApplicationHandlerInfo
                 {
                     InstanceId = ah.ProcessStat?.InstanceId ?? "unknow",
-                    Url = $"{protocol}://{ah.SenderIp}:{ah.Ports?.Api ?? 0}",
+                    Url = $"{protocol}://{ah.SenderIp}:{ah.Port?.GeneralPort ?? 0}",
                     Ranking = ah.ProcessStat?.PrivateMemoryMB ?? 0
                 }).ToList();
 
