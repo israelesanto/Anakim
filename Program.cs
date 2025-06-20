@@ -10,6 +10,9 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Anakim.TrafficManager;
+using Anakim.Services;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Cors.Infrastructure;
 
 class Program
 {
@@ -57,6 +60,9 @@ class Program
                     var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>()
                         ?? throw new InvalidOperationException("Configuração 'ProxySettings' não encontrada ou inválida.");
 
+                    // ✅ Habilita CORS
+                    app.UseCors();
+
                     app.UseRouting();
 
                     switch (proxySettings.Mode)
@@ -71,36 +77,78 @@ class Program
                             break;
                     }
 
-                    app.UseEndpoints(endpoints =>
+                    if (proxySettings.Mode == 3)
                     {
-                        endpoints.MapGet("/", async context =>
+                        app.UseEndpoints(endpoints =>
                         {
-                            var instanceName = proxySettings.InstanceName ?? "Unknown";
-                            var uid = Guid.NewGuid();
-                            var timestamp = DateTime.UtcNow;
-                            var threadCount = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
-                            var threadPoolcount = ThreadPool.ThreadCount;
-
-                            var response = new
+                            endpoints.MapPost("/scripts/{scriptName}", async context =>
                             {
-                                uid,
-                                timestamp,
-                                instance = instanceName,
-                                activeThreads = threadCount,
-                                activeThrPoolcount = threadPoolcount
-                            };
+                                var scriptName = (string?)context.Request.RouteValues["scriptName"];
+                                Logger.LogInfo($"[DEBUG] Endpoint chamado para script: {scriptName}");
+                                Logger.LogInfo($"BaseDirectory: {AppContext.BaseDirectory}");
 
-                            var json = JsonSerializer.Serialize(response);
-                            var jsonBytes = Encoding.UTF8.GetBytes(json);
+                                if (string.IsNullOrWhiteSpace(scriptName))
+                                {
+                                    context.Response.StatusCode = 400;
+                                    await context.Response.WriteAsync("Nome do script não especificado.");
+                                    return;
+                                }
 
-                            context.Response.StatusCode = 200;
-                            context.Response.ContentType = "application/json";
-                            context.Response.ContentLength = jsonBytes.Length;
+                                var executor = context.RequestServices.GetRequiredService<ScriptExecutorService>();
 
-                            await context.Response.Body.WriteAsync(jsonBytes);
-                            await context.Response.Body.FlushAsync();
+                                try
+                                {
+                                    var args = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(context.Request.Body)
+                                               ?? new Dictionary<string, object>();
+
+                                    Logger.LogInfo($"[DEBUG] Executando script: {scriptName}");
+                                    var result = await executor.RunScriptAsync(scriptName, args);
+
+                                    context.Response.ContentType = "application/json";
+                                    await context.Response.WriteAsync(JsonSerializer.Serialize(result));
+                                }
+                                catch (Exception ex)
+                                {
+                                    Logger.LogInfo($"[ERRO] {ex.Message}");
+                                    context.Response.StatusCode = 500;
+                                    await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
+                                }
+                            });
                         });
-                    });
+                    }
+                    else
+                    {
+                        app.UseEndpoints(endpoints =>
+                        {
+                            endpoints.MapGet("/", async context =>
+                            {
+                                var instanceName = proxySettings.InstanceName ?? "Unknown";
+                                var uid = Guid.NewGuid();
+                                var timestamp = DateTime.UtcNow;
+                                var threadCount = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+                                var threadPoolcount = ThreadPool.ThreadCount;
+
+                                var response = new
+                                {
+                                    uid,
+                                    timestamp,
+                                    instance = instanceName,
+                                    activeThreads = threadCount,
+                                    activeThrPoolcount = threadPoolcount
+                                };
+
+                                var json = JsonSerializer.Serialize(response);
+                                var jsonBytes = Encoding.UTF8.GetBytes(json);
+
+                                context.Response.StatusCode = 200;
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength = jsonBytes.Length;
+
+                                await context.Response.Body.WriteAsync(jsonBytes);
+                                await context.Response.Body.FlushAsync();
+                            });
+                        });
+                    }
                 });
             })
             .ConfigureServices((hostingContext, services) =>
@@ -110,6 +158,16 @@ class Program
 
                 var proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                     ?? throw new InvalidOperationException("ProxySettings not configured properly.");
+
+                services.AddCors(options =>
+                {
+                    options.AddDefaultPolicy(policy =>
+                    {
+                        policy.AllowAnyOrigin()
+                              .AllowAnyMethod()
+                              .AllowAnyHeader();
+                    });
+                });
 
                 services.AddSingleton(proxySettings);
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
@@ -130,6 +188,7 @@ class Program
                     case 3:
                         Logger.LogInfo("Configuring as Application Handler");
                         services.AddHostedService<ApplicationHandlerService>();
+                        services.AddSingleton<ScriptExecutorService>();
                         break;
                     default:
                         throw new InvalidOperationException($"Invalid mode: {proxySettings.Mode}");
@@ -139,38 +198,5 @@ class Program
 
         Logger.LogSuccess("Application initialized successfully!");
         await builder.RunAsync();
-    }
-}
-
-public class WorkerService : BackgroundService
-{
-    private readonly IHostedService _service;
-
-    public WorkerService(IEnumerable<IHostedService> services)
-    {
-        _service = services.FirstOrDefault(s =>
-            s is TrafficManagerService || s is ProxyInstanceService || s is ApplicationHandlerService)
-            ?? throw new InvalidOperationException("No valid service found.");
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        Logger.LogInfo("WorkerService started.");
-
-        switch (_service)
-        {
-            case TrafficManagerService tmService:
-                await tmService.StartAsync(stoppingToken);
-                break;
-            case ProxyInstanceService piService:
-                await piService.ConnectToTrafficManager(stoppingToken);
-                break;
-            case ApplicationHandlerService ahService:
-                await ahService.ConnectToProxyInstance(stoppingToken);
-                break;
-            default:
-                Logger.LogError("Unsupported service type provided.");
-                break;
-        }
     }
 }

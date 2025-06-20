@@ -14,7 +14,6 @@ namespace Anakim.TrafficManager
         private readonly FailoverManager _failoverManager;
         private readonly IConfiguration _configuration;
 
-        // Constructor receives dependencies via Dependency Injection
         public RedirectToBestPIMiddleware(
             RequestDelegate next,
             InstanceRankingManager rankingManager,
@@ -27,26 +26,22 @@ namespace Anakim.TrafficManager
             _configuration = configuration;
         }
 
-        // Middleware logic for handling and redirecting the request
         public async Task InvokeAsync(HttpContext context)
         {
             Logger.LogInfo($"Request received on Host: {context.Request.Host.Host}");
 
-            // Gets the list of ranked Proxy Instances from memory
             var rankedInstances = _rankingManager.GetRankedInstances();
 
             if (!rankedInstances.Any())
             {
-                context.Response.StatusCode = 503; // Service Unavailable
+                context.Response.StatusCode = 503;
                 await context.Response.WriteAsync("No Proxy Instance available.");
                 return;
             }
 
-            // Reads the HTTPS usage setting from configuration
             bool useHttps = _configuration.GetValue<bool>("UseHttps");
             var protocol = useHttps ? "https" : "http";
 
-            // Converts statistics into failover handler list
             var handlerList = rankedInstances.Select(pi => new ApplicationHandlerInfo
             {
                 InstanceId = pi.ProcessStat?.InstanceId ?? "unknow",
@@ -54,24 +49,28 @@ namespace Anakim.TrafficManager
                 Ranking = pi.ProcessStat?.PrivateMemoryMB ?? 0
             }).ToList();
 
-            // Updates internal handler list used by FailoverManager
             _failoverManager.UpdateHandlers(handlerList);
 
-            // Gets the best Proxy Instance from the ranking
             var bestInstance = rankedInstances.First();
             if (bestInstance == null || bestInstance.Port?.GeneralPort == null)
             {
-                Logger.LogInfo("bestInstance or its bestInstance.Ports is null.");
+                Logger.LogInfo("bestInstance or its Ports is null.");
                 return;
             }
 
-            // Constructs the target URL by preserving the path and query string
-            var targetUrl = $"{protocol}://{bestInstance.SenderIp}:{bestInstance.Port?.GeneralPort}{context.Request.Path}{context.Request.QueryString}";
+            var targetUrl = $"{protocol}://{bestInstance.SenderIp}:{bestInstance.Port.GeneralPort}{context.Request.Path}{context.Request.QueryString}";
 
             Logger.LogInfo($"Redirecting request to: {targetUrl}");
 
-            // Performs an HTTP redirect to the selected Proxy Instance
-            context.Response.StatusCode = StatusCodes.Status302Found; // Use 307 if you want to preserve the method (e.g., for POST)
+            // Se for /scripts/*, encaminha o corpo corretamente
+            if (context.Request.Path.StartsWithSegments("/scripts"))
+            {
+                await ProxyUtils.RedirectWithBodyAsync(context, targetUrl);
+                return;
+            }
+
+            // Para demais requisições, usa redirecionamento padrão
+            context.Response.StatusCode = StatusCodes.Status307TemporaryRedirect;
             context.Response.Headers["Location"] = targetUrl;
         }
     }

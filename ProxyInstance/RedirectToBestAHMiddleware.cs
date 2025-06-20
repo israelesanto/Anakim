@@ -1,6 +1,8 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Anakim.Infrastructure;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace Anakim.ProxyInstance
 {
@@ -43,43 +45,53 @@ namespace Anakim.ProxyInstance
             bool useHttps = _configuration.GetValue<bool>("UseHttps");
             string protocol = useHttps ? "https" : "http";
 
-            /*
-            // Builds the list of handler URLs
-            var handlerList = rankedInstances
-                .Select(ah => new ApplicationHandlerInfo
-            {
-                InstanceId = ah.ProcessStat.InstanceId,
-                Url = $"{protocol}://{ah.SenderIp}:{ah.Ports.Api}",
-                Ranking = ah.ProcessStat.PrivateMemoryMB
-            }).ToList();
-            */
-
             // Builds the list of handler URLs
             var handlerList = rankedInstances
                 .Select(ah => new ApplicationHandlerInfo
                 {
-                    InstanceId = ah.ProcessStat?.InstanceId ?? "unknow",
+                    InstanceId = ah.ProcessStat?.InstanceId ?? "unknown",
                     Url = $"{protocol}://{ah.SenderIp}:{ah.Port?.GeneralPort ?? 0}",
                     Ranking = ah.ProcessStat?.PrivateMemoryMB ?? 0
                 }).ToList();
 
-            _failoverManager.UpdateHandlers(handlerList);
+            // Enable buffering so body can be read and reused
+            context.Request.EnableBuffering();
 
-            var requestMessage = CreateHttpRequestFromContext(context);
+            // Atualiza lista interna para o FailoverManager
+            _failoverManager.UpdateHandlers(handlerList);
 
             try
             {
-                var responseMessage = await _failoverManager.ForwardWithFailover(requestMessage);
+                Logger.LogInfo("HANDLERS DISPONÍVEIS:");
+                foreach (var handler in handlerList)
+                {
+                    Logger.LogInfo($" - {handler.InstanceId} | {handler.Url} | TemporarilyUnavailable: {handler.TemporarilyUnavailable}");
+                }
 
-                context.Response.StatusCode = (int)responseMessage.StatusCode;
+                // Usa o FailoverManager para decidir o melhor AH
+                var bestHandler = _failoverManager.GetBestHandler();
 
-                foreach (var header in responseMessage.Headers)
-                    context.Response.Headers[header.Key] = header.Value.ToArray();
+                if (bestHandler != null)
+                {
+                    Logger.LogInfo($"Selecionado: {bestHandler.InstanceId} -> {bestHandler.Url}");
+                }
+                else
+                {
+                    Logger.LogWarning("Nenhum handler selecionado!");
+                }
 
-                foreach (var header in responseMessage.Content.Headers)
-                    context.Response.Headers[header.Key] = header.Value.ToArray();
+                if (bestHandler == null)
+                    throw new Exception("Nenhum handler disponível no momento.");
 
-                await responseMessage.Content.CopyToAsync(context.Response.Body);
+                var targetUrl = $"{bestHandler.Url}{context.Request.Path}{context.Request.QueryString}";
+
+                Logger.LogInfo($"Redirecting to Application Handler: {targetUrl}");
+
+                // Garante que o corpo da requisição está posicionado corretamente
+                context.Request.Body.Position = 0;
+
+                // Faz o redirecionamento com corpo preservado
+                await ProxyUtils.RedirectWithBodyAsync(context, targetUrl);
             }
             catch (Exception ex)
             {
@@ -87,25 +99,6 @@ namespace Anakim.ProxyInstance
                 context.Response.StatusCode = 502;
                 await context.Response.WriteAsync("Error forwarding to Application Handler with failover.");
             }
-        }
-
-        // Converts the current HttpContext into an HttpRequestMessage for forwarding
-        private HttpRequestMessage CreateHttpRequestFromContext(HttpContext context)
-        {
-            var placeholderUrl = "http://placeholder"; // Will be replaced by FailoverManager
-            var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), placeholderUrl);
-
-            if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
-            {
-                request.Content = new StreamContent(context.Request.Body);
-            }
-
-            foreach (var header in context.Request.Headers)
-            {
-                request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
-            }
-
-            return request;
         }
     }
 }

@@ -118,7 +118,34 @@ namespace Anakim.Infrastructure
             foreach (var header in original.Headers)
                 clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
 
+            if (original.Content != null)
+            {
+                foreach (var header in original.Content.Headers)
+                    clone.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
+
             return clone;
         }
+
+        public ApplicationHandlerInfo? GetBestHandler()
+        {
+            lock (_lock)
+            {
+                var disponiveis = _handlers.Values
+                    .Where(h => !h.TemporarilyUnavailable)
+                    .OrderBy(h => h.Ranking)
+                    .ToList();
+
+                if (!disponiveis.Any())
+                    return null;
+
+                var escolhido = disponiveis[0];
+
+                Logger.LogInfo($"[FailoverManager] Handler selecionado: {escolhido.InstanceId} - {escolhido.Url}");
+
+                return escolhido;
+            }
+        }
+
     }
 }
