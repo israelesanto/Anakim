@@ -1,11 +1,12 @@
 ﻿using System.Collections.Concurrent;
+using System.Net.Http;
 
 namespace Anakim.Infrastructure
 {
     public class FailoverManager
     {
         private readonly ConcurrentDictionary<string, ApplicationHandlerInfo> _handlers = new();
-        private readonly HttpClient _httpClient = new();
+        private readonly HttpClient _httpClient;
         private readonly Timer _healthCheckTimer;
         private readonly TimeSpan _retryInterval = TimeSpan.FromSeconds(30);
         private int _lastUsedIndex = -1;
@@ -13,6 +14,14 @@ namespace Anakim.Infrastructure
 
         public FailoverManager()
         {
+            // ⚠️ Aceita certificados SSL inválidos (autoassinados) — apenas para testes
+            var handler = new HttpClientHandler
+            {
+                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+            };
+
+            _httpClient = new HttpClient(handler);
+
             _healthCheckTimer = new Timer(HealthCheckCallback, null, _retryInterval, _retryInterval);
         }
 
@@ -28,7 +37,7 @@ namespace Anakim.Infrastructure
         {
             var availableHandlers = _handlers.Values
                 .Where(h => !h.TemporarilyUnavailable)
-                .OrderBy(h => h.InstanceId) // order for round-robin fairness
+                .OrderBy(h => h.InstanceId)
                 .ToList();
 
             if (!availableHandlers.Any())
