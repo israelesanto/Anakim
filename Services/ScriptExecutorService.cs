@@ -4,6 +4,7 @@ using Microsoft.Extensions.Configuration;
 using System.Collections.Concurrent;
 using System.Reflection;
 using Anakim.Infrastructure;
+using 
 
 namespace Anakim.Services
 {
@@ -113,6 +114,8 @@ namespace Anakim.Services
         public class Globals
         {
             public IDictionary<string, object> Args { get; set; } = new Dictionary<string, object>();
+            public IDataAccessProvider Db { get; set; } // ← aqui o provider de acesso a dados
         }
+
     }
 }
