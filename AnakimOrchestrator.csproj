@@ -27,7 +27,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\DataAccessProviderGit\DataAccessProvider.csproj" />
+    <ProjectReference Include="..\..\DataAccessProviderGit\AnakimAccessProvider.csproj" />
   </ItemGroup>
 
   <ItemGroup>

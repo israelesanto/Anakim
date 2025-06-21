@@ -13,7 +13,7 @@ using AnakimOrchestrator.TrafficManager;
 using AnakimOrchestrator.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Cors.Infrastructure;
-using ERPUSASolutions.DataAccessProvider;
+using AnakimSuite.AnakimAccessProvider;
 
 class Program
 {
@@ -176,10 +176,10 @@ class Program
                 services.AddSingleton<InstanceRankingManager>();
 
                 // ✅ Injeta o provider de banco de dados baseado no appsettings.json
-                services.AddSingleton<IDataAccessProvider>(sp =>
+                services.AddSingleton<IAnakimAccessProvider>(sp =>
                 {
                     var config = sp.GetRequiredService<IConfiguration>();
-                    return DataAccessProviderFactory.Create(config);
+                    return AnakimAccessProviderFactory.Create(config);
                 });
 
                 switch (proxySettings.Mode)

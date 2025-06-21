@@ -4,7 +4,7 @@ using Microsoft.Extensions.Configuration;
 using System.Collections.Concurrent;
 using System.Reflection;
 using AnakimOrchestrator.Infrastructure;
-using ERPUSASolutions.DataAccessProvider;
+using AnakimSuite.AnakimAccessProvider;
 
 namespace AnakimOrchestrator.Services
 {
@@ -18,13 +18,13 @@ namespace AnakimOrchestrator.Services
     public class ScriptExecutorService
     {
         private readonly IConfiguration _configuration;
-        private readonly IDataAccessProvider _dbProvider;
+        private readonly IAnakimAccessProvider _dbProvider;
         private static readonly string BaseScriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts");
 
         // Cache de scripts compilados
         private static readonly ConcurrentDictionary<string, (Script<object> Script, DateTime LastWrite)> _scriptCache = new();
 
-        public ScriptExecutorService(IConfiguration configuration, IDataAccessProvider dbProvider)
+        public ScriptExecutorService(IConfiguration configuration, IAnakimAccessProvider dbProvider)
         {
             _configuration = configuration;
             _dbProvider = dbProvider;
@@ -121,7 +121,7 @@ namespace AnakimOrchestrator.Services
         public class Globals
         {
             public IDictionary<string, object> Args { get; set; } = new Dictionary<string, object>();
-            public IDataAccessProvider Db { get; set; }
+            public IAnakimAccessProvider Db { get; set; }
         }
     }
 }
