@@ -13,6 +13,7 @@ using Anakim.TrafficManager;
 using Anakim.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Cors.Infrastructure;
+using ERPUSASolutions.DataAccessProvider;
 
 class Program
 {
@@ -170,8 +171,16 @@ class Program
                 });
 
                 services.AddSingleton(proxySettings);
+                services.AddSingleton<ScriptExecutorService>();
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
                 services.AddSingleton<InstanceRankingManager>();
+
+                // ✅ Injeta o provider de banco de dados baseado no appsettings.json
+                services.AddSingleton<IDataAccessProvider>(sp =>
+                {
+                    var config = sp.GetRequiredService<IConfiguration>();
+                    return DataAccessProviderFactory.Create(config);
+                });
 
                 switch (proxySettings.Mode)
                 {
@@ -194,6 +203,7 @@ class Program
                         throw new InvalidOperationException($"Invalid mode: {proxySettings.Mode}");
                 }
             })
+
             .Build();
 
         Logger.LogSuccess("Application initialized successfully!");

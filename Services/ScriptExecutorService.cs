@@ -4,7 +4,7 @@ using Microsoft.Extensions.Configuration;
 using System.Collections.Concurrent;
 using System.Reflection;
 using Anakim.Infrastructure;
-using 
+using ERPUSASolutions.DataAccessProvider;
 
 namespace Anakim.Services
 {
@@ -18,14 +18,16 @@ namespace Anakim.Services
     public class ScriptExecutorService
     {
         private readonly IConfiguration _configuration;
+        private readonly IDataAccessProvider _dbProvider;
         private static readonly string BaseScriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts");
 
         // Cache de scripts compilados
         private static readonly ConcurrentDictionary<string, (Script<object> Script, DateTime LastWrite)> _scriptCache = new();
 
-        public ScriptExecutorService(IConfiguration configuration)
+        public ScriptExecutorService(IConfiguration configuration, IDataAccessProvider dbProvider)
         {
             _configuration = configuration;
+            _dbProvider = dbProvider;
         }
 
         public async Task<object?> RunScriptAsync(string scriptName, IDictionary<string, object> args, int? languageOverride = null)
@@ -37,8 +39,6 @@ namespace Anakim.Services
             return (ScriptLanguage)languageCode switch
             {
                 ScriptLanguage.CSharp => await RunCSharpScriptAsync(scriptName, args),
-                // ScriptLanguage.Python => await RunPythonScriptAsync(scriptName, args),
-                // ScriptLanguage.JavaScript => await RunJavaScriptScriptAsync(scriptName, args),
                 _ => throw new NotSupportedException($"Código de linguagem '{languageCode}' não é suportado.")
             };
         }
@@ -59,7 +59,8 @@ namespace Anakim.Services
                 var options = ScriptOptions.Default
                     .AddImports("System", "System.Collections.Generic")
                     .AddReferences(AppDomain.CurrentDomain.GetAssemblies()
-                        .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location)));
+                        .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location)))
+                    .AddReferences("Microsoft.CSharp"); // ✅ Referência necessária para uso de dynamic
 
                 var compiledScript = CSharpScript.Create(code, options, typeof(Globals));
 
@@ -71,7 +72,11 @@ namespace Anakim.Services
             }
 
             var (script, _) = _scriptCache[scriptPath];
-            var globals = new Globals { Args = args };
+            var globals = new Globals
+            {
+                Args = args,
+                Db = _dbProvider
+            };
 
             var scriptState = await script.RunAsync(globals);
 
@@ -90,15 +95,17 @@ namespace Anakim.Services
 
             try
             {
-                return runMethod.Invoke(scriptObject, new object[] { args });
+                var resultTask = (Task<object>)runMethod.Invoke(scriptObject, new object[] { globals });
+                return await resultTask;
+
             }
             catch (TargetInvocationException ex)
             {
                 Logger.LogError($"Erro no script: {ex.InnerException?.Message}");
                 throw new Exception($"Erro ao executar método Run: {ex.InnerException?.Message}", ex);
             }
-
         }
+
         private void InjectBuiltInVariables(IDictionary<string, object> args)
         {
             if (!args.ContainsKey("__instance"))
@@ -114,8 +121,7 @@ namespace Anakim.Services
         public class Globals
         {
             public IDictionary<string, object> Args { get; set; } = new Dictionary<string, object>();
-            public IDataAccessProvider Db { get; set; } // ← aqui o provider de acesso a dados
+            public IDataAccessProvider Db { get; set; }
         }
-
     }
 }
