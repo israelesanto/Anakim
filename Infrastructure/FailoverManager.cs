@@ -1,7 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using System.Net.Http;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     public class FailoverManager
     {

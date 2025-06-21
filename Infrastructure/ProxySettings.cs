@@ -1,7 +1,7 @@
-﻿using Anakim.ProxyInstance;
-using Anakim.TrafficManager;
+﻿using AnakimOrchestrator.ProxyInstance;
+using AnakimOrchestrator.TrafficManager;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     public class ProxySettings
     {

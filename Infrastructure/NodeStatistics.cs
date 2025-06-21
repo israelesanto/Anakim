@@ -4,7 +4,7 @@ using System.Net.Sockets;
 using System.Net;
 using System.Threading;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     public class NodeStatistics
     {

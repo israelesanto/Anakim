@@ -3,10 +3,10 @@ using Microsoft.CodeAnalysis.Scripting;
 using Microsoft.Extensions.Configuration;
 using System.Collections.Concurrent;
 using System.Reflection;
-using Anakim.Infrastructure;
+using AnakimOrchestrator.Infrastructure;
 using ERPUSASolutions.DataAccessProvider;
 
-namespace Anakim.Services
+namespace AnakimOrchestrator.Services
 {
     public enum ScriptLanguage
     {

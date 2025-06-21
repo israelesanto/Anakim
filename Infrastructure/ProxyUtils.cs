@@ -1,7 +1,7 @@
 ﻿using Microsoft.AspNetCore.Http;
 using System.Net.Http.Headers;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     public static class ProxyUtils
     {

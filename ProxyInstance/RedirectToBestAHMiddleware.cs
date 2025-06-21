@@ -1,10 +1,10 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using Anakim.Infrastructure;
+using AnakimOrchestrator.Infrastructure;
 using System.Linq;
 using System.Threading.Tasks;
 
-namespace Anakim.ProxyInstance
+namespace AnakimOrchestrator.ProxyInstance
 {
     // Middleware that intercepts HTTP requests and forwards them to the best available Application Handler (AH) using failover
     public class RedirectToBestAHMiddleware

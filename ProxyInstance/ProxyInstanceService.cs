@@ -5,9 +5,9 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using Anakim.Infrastructure;
+using AnakimOrchestrator.Infrastructure;
 
-namespace Anakim.ProxyInstance
+namespace AnakimOrchestrator.ProxyInstance
 {
     // This background service acts as a Proxy Instance: it listens to Application Handlers and reports stats to the Traffic Manager
     public class ProxyInstanceService : BackgroundService

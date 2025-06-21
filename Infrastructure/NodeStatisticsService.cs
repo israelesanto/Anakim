@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Configuration;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     // Service responsible for collecting statistics about the current process and system
     public class NodeStatisticsService : INodeStatisticsService

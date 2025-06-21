@@ -1,8 +1,8 @@
 ﻿using Microsoft.Extensions.Hosting;
-using Anakim.ProxyInstance;
-using Anakim.TrafficManager;
+using AnakimOrchestrator.ProxyInstance;
+using AnakimOrchestrator.TrafficManager;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     // Background service that delegates execution to one of the core services (TM, PI, AH)
     public class WorkerService : BackgroundService

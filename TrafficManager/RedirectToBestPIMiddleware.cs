@@ -1,10 +1,10 @@
 ﻿using System.Net.Http;
-using Anakim.Infrastructure;
+using AnakimOrchestrator.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using System.Linq;
 
-namespace Anakim.TrafficManager
+namespace AnakimOrchestrator.TrafficManager
 {
     // Middleware used by the Traffic Manager to redirect requests to the best available Proxy Instance
     public class RedirectToBestPIMiddleware

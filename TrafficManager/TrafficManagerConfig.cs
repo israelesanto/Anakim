@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace Anakim.TrafficManager
+namespace AnakimOrchestrator.TrafficManager
 {
     public class TrafficManagerConfig
     {

@@ -1,4 +1,4 @@
-﻿namespace Anakim.Infrastructure
+﻿namespace AnakimOrchestrator.Infrastructure
 {
     public interface INodeStatisticsService
     {

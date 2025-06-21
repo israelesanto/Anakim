@@ -1,10 +1,10 @@
-﻿using Anakim.Infrastructure;
+﻿using AnakimOrchestrator.Infrastructure;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     // Manages ranking and availability of running instances (e.g., ProxyInstances or ApplicationHandlers)
     public class InstanceRankingManager

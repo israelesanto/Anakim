@@ -6,7 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
-namespace Anakim.Infrastructure
+namespace AnakimOrchestrator.Infrastructure
 {
     // Background service that runs the Application Handler role
     public class ApplicationHandlerService : BackgroundService

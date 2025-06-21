@@ -36,6 +36,10 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="Scripts\Templates\" />
+  </ItemGroup>
+
   <Target Name="PostBuild" AfterTargets="Build">
     <Exec Command="powershell -ExecutionPolicy Bypass -File C:\Anakins\ReplicarArquivos.ps1" />
   </Target>

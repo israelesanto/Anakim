@@ -4,9 +4,9 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
-using Anakim.Infrastructure;
+using AnakimOrchestrator.Infrastructure;
 
-namespace Anakim.TrafficManager
+namespace AnakimOrchestrator.TrafficManager
 {
     // Service that runs in Traffic Manager mode (Mode = 1) and listens for statistics from Proxy Instances
     public class TrafficManagerService : IHostedService
