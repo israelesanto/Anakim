@@ -61,32 +61,75 @@ class Program
                     var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>()
                         ?? throw new InvalidOperationException("Configuração 'ProxySettings' não encontrada ou inválida.");
 
-                    // ✅ Habilita CORS
+                    Logger.LogInfo($"[STARTUP] Executando modo: {proxySettings.Mode}");
                     app.UseCors();
-
                     app.UseRouting();
 
                     switch (proxySettings.Mode)
                     {
                         case 1:
+                            Logger.LogInfo("[PIPELINE] Ativando middleware de redirecionamento para PI");
                             app.UseMiddleware<RedirectToBestPIMiddleware>();
                             break;
                         case 2:
+                            Logger.LogInfo("[PIPELINE] Ativando middleware de redirecionamento para AH");
                             app.UseMiddleware<RedirectToBestAHMiddleware>();
                             break;
                         case 3:
+                            Logger.LogInfo("[PIPELINE] Application Handler ativado - registrando endpoints personalizados");
                             break;
                     }
 
-                    if (proxySettings.Mode == 3)
+                    app.UseEndpoints(endpoints =>
                     {
-                        app.UseEndpoints(endpoints =>
+                        Logger.LogInfo("[ENDPOINTS] Mapeando endpoints gerais");
+
+                        if (proxySettings.Mode == 3)
                         {
+                            Logger.LogInfo("[ENDPOINTS] Modo 3 detectado: mapeando /auth/login e /scripts/{scriptName}");
+
+                            endpoints.MapPost("/auth/login", async context =>
+                            {
+                                var configuration = context.RequestServices.GetRequiredService<IConfiguration>();
+                                var authBaseUrl = configuration.GetSection("AnakimAuthService")["BaseUrl"];
+
+                                Logger.LogInfo("[AUTH LOGIN] Endpoint /auth/login recebido");
+
+                                if (string.IsNullOrWhiteSpace(authBaseUrl))
+                                {
+                                    Logger.LogError("[AUTH LOGIN] Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
+                                    context.Response.StatusCode = 500;
+                                    await context.Response.WriteAsync("Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
+                                    return;
+                                }
+
+                                var targetUrl = $"{authBaseUrl}/login";
+                                Logger.LogInfo($"[AUTH LOGIN] Redirecionando para {targetUrl}");
+
+                                using var client = new HttpClient();
+                                var body = await new StreamReader(context.Request.Body).ReadToEndAsync();
+                                var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+                                try
+                                {
+                                    var response = await client.PostAsync(targetUrl, content);
+                                    context.Response.StatusCode = (int)response.StatusCode;
+                                    var responseBody = await response.Content.ReadAsStringAsync();
+                                    context.Response.ContentType = "application/json";
+                                    await context.Response.WriteAsync(responseBody);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Logger.LogError($"[AUTH PROXY ERROR] {ex.Message}");
+                                    context.Response.StatusCode = 500;
+                                    await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
+                                }
+                            });
+
                             endpoints.MapPost("/scripts/{scriptName}", async context =>
                             {
                                 var scriptName = (string?)context.Request.RouteValues["scriptName"];
-                                Logger.LogInfo($"[DEBUG] Endpoint chamado para script: {scriptName}");
-                                Logger.LogInfo($"BaseDirectory: {AppContext.BaseDirectory}");
+                                Logger.LogInfo($"[SCRIPT] Endpoint chamado para script: {scriptName}");
 
                                 if (string.IsNullOrWhiteSpace(scriptName))
                                 {
@@ -102,7 +145,7 @@ class Program
                                     var args = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(context.Request.Body)
                                                ?? new Dictionary<string, object>();
 
-                                    Logger.LogInfo($"[DEBUG] Executando script: {scriptName}");
+                                    Logger.LogInfo($"[SCRIPT] Executando script: {scriptName}");
                                     var result = await executor.RunScriptAsync(scriptName, args);
 
                                     context.Response.ContentType = "application/json";
@@ -110,19 +153,18 @@ class Program
                                 }
                                 catch (Exception ex)
                                 {
-                                    Logger.LogInfo($"[ERRO] {ex.Message}");
+                                    Logger.LogError($"[SCRIPT ERROR] {ex.Message}");
                                     context.Response.StatusCode = 500;
                                     await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
                                 }
                             });
-                        });
-                    }
-                    else
-                    {
-                        app.UseEndpoints(endpoints =>
+                        }
+                        else
                         {
                             endpoints.MapGet("/", async context =>
                             {
+                                Logger.LogInfo("[DEBUG] Endpoint GET / chamado");
+
                                 var instanceName = proxySettings.InstanceName ?? "Unknown";
                                 var uid = Guid.NewGuid();
                                 var timestamp = DateTime.UtcNow;
@@ -148,8 +190,8 @@ class Program
                                 await context.Response.Body.WriteAsync(jsonBytes);
                                 await context.Response.Body.FlushAsync();
                             });
-                        });
-                    }
+                        }
+                    });
                 });
             })
             .ConfigureServices((hostingContext, services) =>
@@ -175,7 +217,6 @@ class Program
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
                 services.AddSingleton<InstanceRankingManager>();
 
-                // ✅ Injeta o provider de banco de dados baseado no appsettings.json
                 services.AddSingleton<IAnakimAccessProvider>(sp =>
                 {
                     var config = sp.GetRequiredService<IConfiguration>();

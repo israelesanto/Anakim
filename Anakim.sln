@@ -7,7 +7,7 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AnakimOrchestrator", "Anaki
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AnakimAccessProvider", "..\..\DataAccessProviderGit\AnakimAccessProvider.csproj", "{21602DD8-0807-4732-A3E4-66F7E59A51FF}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AnakimAuthService", "..\..\AnakimAuthServiceGit\AnakimAuthService\AnakimAuthService.csproj", "{2B2AFD0D-C1F1-4E72-93E2-79B0EAEA4C63}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AnakimMetadataManagment", "..\..\MetadataManagementSystemGit\AnakimMetadataManagment.csproj", "{32E68AC1-42B8-4044-9927-7FA39D5E5DA7}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -23,10 +23,10 @@ Global
 		{21602DD8-0807-4732-A3E4-66F7E59A51FF}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{21602DD8-0807-4732-A3E4-66F7E59A51FF}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{21602DD8-0807-4732-A3E4-66F7E59A51FF}.Release|Any CPU.Build.0 = Release|Any CPU
-		{2B2AFD0D-C1F1-4E72-93E2-79B0EAEA4C63}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{2B2AFD0D-C1F1-4E72-93E2-79B0EAEA4C63}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{2B2AFD0D-C1F1-4E72-93E2-79B0EAEA4C63}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{2B2AFD0D-C1F1-4E72-93E2-79B0EAEA4C63}.Release|Any CPU.Build.0 = Release|Any CPU
+		{32E68AC1-42B8-4044-9927-7FA39D5E5DA7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{32E68AC1-42B8-4044-9927-7FA39D5E5DA7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{32E68AC1-42B8-4044-9927-7FA39D5E5DA7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{32E68AC1-42B8-4044-9927-7FA39D5E5DA7}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

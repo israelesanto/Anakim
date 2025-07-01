@@ -5,11 +5,11 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <ApplicationIcon>warrior_4374275_IeQ_icon.ico</ApplicationIcon>
+    <ApplicationIcon>ico-vermelho.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="warrior_4374275_IeQ_icon.ico" />
+    <Content Include="ico-vermelho.ico" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +23,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.4" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.4" />
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.0.4" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.12.1" />
     <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
   </ItemGroup>
 
