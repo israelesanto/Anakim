@@ -62,6 +62,10 @@ class Program
                         ?? throw new InvalidOperationException("Configuração 'ProxySettings' não encontrada ou inválida.");
 
                     Logger.LogInfo($"[STARTUP] Executando modo: {proxySettings.Mode}");
+
+                    app.UseDefaultFiles();
+                    app.UseStaticFiles();
+
                     app.UseCors();
                     app.UseRouting();
 
