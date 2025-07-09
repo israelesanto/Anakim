@@ -66,7 +66,8 @@ class Program
                     app.UseDefaultFiles();
                     app.UseStaticFiles();
 
-                    app.UseCors();
+                    app.UseCors("AllowBoltFrontend"); // APLICAÇÃO DA POLÍTICA
+
                     app.UseRouting();
 
                     switch (proxySettings.Mode)
@@ -208,11 +209,12 @@ class Program
 
                 services.AddCors(options =>
                 {
-                    options.AddDefaultPolicy(policy =>
+                    options.AddPolicy("AllowBoltFrontend", policy =>
                     {
-                        policy.AllowAnyOrigin()
+                        policy.WithOrigins("http://localhost:3000")
+                              .AllowAnyHeader()
                               .AllowAnyMethod()
-                              .AllowAnyHeader();
+                              .AllowCredentials();
                     });
                 });
 
@@ -248,7 +250,6 @@ class Program
                         throw new InvalidOperationException($"Invalid mode: {proxySettings.Mode}");
                 }
             })
-
             .Build();
 
         Logger.LogSuccess("Application initialized successfully!");
