@@ -12,7 +12,6 @@ using System.Text.Json;
 using AnakimOrchestrator.TrafficManager;
 using AnakimOrchestrator.Services;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Cors.Infrastructure;
 using AnakimSuite.AnakimAccessProvider;
 
 class Program
@@ -63,10 +62,34 @@ class Program
 
                     Logger.LogInfo($"[STARTUP] Executando modo: {proxySettings.Mode}");
 
-                    app.UseDefaultFiles();
-                    app.UseStaticFiles();
+                    if (proxySettings.Mode == 3) // AH
+                    {
+                        app.UseDefaultFiles();
+                        app.UseStaticFiles();
+                    }
 
-                    app.UseCors("AllowBoltFrontend"); // APLICAÇÃO DA POLÍTICA
+                    app.UseCors(); // agora usa a política carregada dinamicamente
+
+                    app.Use(async (context, next) =>
+                    {
+                        var origin = context.Request.Headers["Origin"].FirstOrDefault();
+                        if (!string.IsNullOrWhiteSpace(origin))
+                        {
+                            context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+                            context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+                            context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
+                            context.Response.Headers["Access-Control-Allow-Credentials"] = "true";
+                        }
+
+                        if (context.Request.Method == HttpMethods.Options)
+                        {
+                            context.Response.StatusCode = 204;
+                            await context.Response.CompleteAsync();
+                            return;
+                        }
+
+                        await next();
+                    });
 
                     app.UseRouting();
 
@@ -75,10 +98,12 @@ class Program
                         case 1:
                             Logger.LogInfo("[PIPELINE] Ativando middleware de redirecionamento para PI");
                             app.UseMiddleware<RedirectToBestPIMiddleware>();
+                            app.UseMiddleware<CorsProxyToPIMiddleware>();
                             break;
                         case 2:
                             Logger.LogInfo("[PIPELINE] Ativando middleware de redirecionamento para AH");
                             app.UseMiddleware<RedirectToBestAHMiddleware>();
+                            app.UseMiddleware<ProxyCorsRedirectMiddleware>();
                             break;
                         case 3:
                             Logger.LogInfo("[PIPELINE] Application Handler ativado - registrando endpoints personalizados");
@@ -91,13 +116,10 @@ class Program
 
                         if (proxySettings.Mode == 3)
                         {
-                            Logger.LogInfo("[ENDPOINTS] Modo 3 detectado: mapeando /auth/login e /scripts/{scriptName}");
-
                             endpoints.MapPost("/auth/login", async context =>
                             {
                                 var configuration = context.RequestServices.GetRequiredService<IConfiguration>();
                                 var authBaseUrl = configuration.GetSection("AnakimAuthService")["BaseUrl"];
-
                                 Logger.LogInfo("[AUTH LOGIN] Endpoint /auth/login recebido");
 
                                 if (string.IsNullOrWhiteSpace(authBaseUrl))
@@ -130,71 +152,6 @@ class Program
                                     await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
                                 }
                             });
-
-                            endpoints.MapPost("/scripts/{scriptName}", async context =>
-                            {
-                                var scriptName = (string?)context.Request.RouteValues["scriptName"];
-                                Logger.LogInfo($"[SCRIPT] Endpoint chamado para script: {scriptName}");
-
-                                if (string.IsNullOrWhiteSpace(scriptName))
-                                {
-                                    context.Response.StatusCode = 400;
-                                    await context.Response.WriteAsync("Nome do script não especificado.");
-                                    return;
-                                }
-
-                                var executor = context.RequestServices.GetRequiredService<ScriptExecutorService>();
-
-                                try
-                                {
-                                    var args = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(context.Request.Body)
-                                               ?? new Dictionary<string, object>();
-
-                                    Logger.LogInfo($"[SCRIPT] Executando script: {scriptName}");
-                                    var result = await executor.RunScriptAsync(scriptName, args);
-
-                                    context.Response.ContentType = "application/json";
-                                    await context.Response.WriteAsync(JsonSerializer.Serialize(result));
-                                }
-                                catch (Exception ex)
-                                {
-                                    Logger.LogError($"[SCRIPT ERROR] {ex.Message}");
-                                    context.Response.StatusCode = 500;
-                                    await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
-                                }
-                            });
-                        }
-                        else
-                        {
-                            endpoints.MapGet("/", async context =>
-                            {
-                                Logger.LogInfo("[DEBUG] Endpoint GET / chamado");
-
-                                var instanceName = proxySettings.InstanceName ?? "Unknown";
-                                var uid = Guid.NewGuid();
-                                var timestamp = DateTime.UtcNow;
-                                var threadCount = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
-                                var threadPoolcount = ThreadPool.ThreadCount;
-
-                                var response = new
-                                {
-                                    uid,
-                                    timestamp,
-                                    instance = instanceName,
-                                    activeThreads = threadCount,
-                                    activeThrPoolcount = threadPoolcount
-                                };
-
-                                var json = JsonSerializer.Serialize(response);
-                                var jsonBytes = Encoding.UTF8.GetBytes(json);
-
-                                context.Response.StatusCode = 200;
-                                context.Response.ContentType = "application/json";
-                                context.Response.ContentLength = jsonBytes.Length;
-
-                                await context.Response.Body.WriteAsync(jsonBytes);
-                                await context.Response.Body.FlushAsync();
-                            });
                         }
                     });
                 });
@@ -207,17 +164,22 @@ class Program
                 var proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                     ?? throw new InvalidOperationException("ProxySettings not configured properly.");
 
+                var allowedOrigins = configuration
+                    .GetSection("Cors:AllowedOrigins")
+                    .Get<string[]>();
+
                 services.AddCors(options =>
                 {
-                    options.AddPolicy("AllowBoltFrontend", policy =>
+                    options.AddDefaultPolicy(policy =>
                     {
-                        policy.WithOrigins("http://localhost:3000")
+                        policy.WithOrigins(allowedOrigins!)
                               .AllowAnyHeader()
                               .AllowAnyMethod()
                               .AllowCredentials();
                     });
                 });
 
+                services.AddHttpClient();
                 services.AddSingleton(proxySettings);
                 services.AddSingleton<ScriptExecutorService>();
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
