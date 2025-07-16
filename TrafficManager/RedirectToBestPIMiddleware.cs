@@ -58,7 +58,11 @@ namespace AnakimOrchestrator.TrafficManager
                 return;
             }
 
-            var targetUrl = $"{protocol}://{bestInstance.SenderIp}:{bestInstance.Port.GeneralPort}{context.Request.Path}{context.Request.QueryString}";
+            bool redirectUseSenderIp = _configuration.GetValue<bool>("ProxySettings:RedirectUseSenderIp");
+            var redirectHost = redirectUseSenderIp ? bestInstance.SenderIp : "localhost";
+
+            var targetUrl = $"{protocol}://{redirectHost}:{bestInstance.Port.GeneralPort}{context.Request.Path}{context.Request.QueryString}";
+
 
             Logger.LogInfo($"Redirecting request to: {targetUrl}");
 

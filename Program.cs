@@ -42,8 +42,7 @@ class Program
                     if (useHttps)
                     {
                         var certSettings = configuration.GetSection("Certificate");
-                        var certPath = certSettings.GetValue<string>("Path")
-                            ?? throw new InvalidOperationException("Missing 'Certificate:Path' in appsettings.json.");
+                        var certPath = certSettings.GetValue<string>("Path") ?? throw new InvalidOperationException("Missing 'Certificate:Path' in appsettings.json.");
                         var certPassword = certSettings.GetValue<string>("Password");
                         var certificate = new X509Certificate2(certPath, certPassword);
 

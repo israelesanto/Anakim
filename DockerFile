@@ -1,0 +1,17 @@
+# Etapa 1: build da aplicação
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet publish -c Release -o /app
+
+# Etapa 2: imagem runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=build /app ./
+
+# Expõe as portas usadas pelas instâncias
+EXPOSE 6001
+EXPOSE 7001
+EXPOSE 8001
+
+ENTRYPOINT ["dotnet", "AnakimOrchestrator.dll"]
