@@ -13,6 +13,9 @@ using AnakimOrchestrator.TrafficManager;
 using AnakimOrchestrator.Services;
 using Microsoft.AspNetCore.Http;
 using AnakimSuite.AnakimAccessProvider;
+using System.Security.Cryptography;
+using System.Runtime.InteropServices;
+using AnakimOrchestrator.Controllers;
 
 class Program
 {
@@ -41,10 +44,39 @@ class Program
 
                     if (useHttps)
                     {
-                        var certSettings = configuration.GetSection("Certificate");
-                        var certPath = certSettings.GetValue<string>("Path") ?? throw new InvalidOperationException("Missing 'Certificate:Path' in appsettings.json.");
-                        var certPassword = certSettings.GetValue<string>("Password");
-                        var certificate = new X509Certificate2(certPath, certPassword);
+                        var pfxSection = configuration.GetSection("Certificate:Pfx");
+                        var pfxPath = pfxSection.GetValue<string>("Path");
+                        var password = pfxSection.GetValue<string>("Password");
+                        var pemSection = configuration.GetSection("Certificate:Pem");
+                        var certPath = pemSection.GetValue<string>("CertPath");
+                        var keyPath = pemSection.GetValue<string>("KeyPath");
+
+                        X509Certificate2 certificate;
+
+                        Logger.LogInfo($"[CERT DEBUG] pfxPath: {pfxPath}");
+                        Logger.LogInfo($"[CERT DEBUG] password: {(string.IsNullOrEmpty(password) ? "NULL ou vazio" : "****")}");
+
+                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                        {
+                            Logger.LogInfo("[CERT] Ambiente Windows - carregando .pfx");
+                            certificate = new X509Certificate2(pfxPath, password);
+                        }
+                        else
+                        {
+                            Logger.LogInfo("[CERT] Ambiente Linux - carregando .pem + .key");
+                            var pemCert = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+
+                            if (!pemCert.HasPrivateKey)
+                            {
+                                var rsa = RSA.Create();
+                                rsa.ImportFromPem(File.ReadAllText(keyPath));
+                                certificate = pemCert.CopyWithPrivateKey(rsa);
+                            }
+                            else
+                            {
+                                certificate = pemCert;
+                            }
+                        }
 
                         options.ListenAnyIP(port, listenOptions => listenOptions.UseHttps(certificate));
                     }
@@ -67,7 +99,7 @@ class Program
                         app.UseStaticFiles();
                     }
 
-                    app.UseCors(); // agora usa a política carregada dinamicamente
+                    app.UseCors();
 
                     app.Use(async (context, next) =>
                     {
@@ -106,53 +138,50 @@ class Program
                             break;
                         case 3:
                             Logger.LogInfo("[PIPELINE] Application Handler ativado - registrando endpoints personalizados");
+                            app.UseEndpoints(endpoints =>
+                            {
+                                Logger.LogInfo("[ENDPOINTS] Mapeando endpoints gerais");
+                                endpoints.MapControllers();
+
+                                endpoints.MapPost("/auth/login", async context =>
+                                {
+                                    var configuration = context.RequestServices.GetRequiredService<IConfiguration>();
+                                    var authBaseUrl = configuration.GetSection("AnakimAuthService")["BaseUrl"];
+                                    Logger.LogInfo("[AUTH LOGIN] Endpoint /auth/login recebido");
+
+                                    if (string.IsNullOrWhiteSpace(authBaseUrl))
+                                    {
+                                        Logger.LogError("[AUTH LOGIN] Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
+                                        context.Response.StatusCode = 500;
+                                        await context.Response.WriteAsync("Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
+                                        return;
+                                    }
+
+                                    var targetUrl = $"{authBaseUrl}/login";
+                                    Logger.LogInfo($"[AUTH LOGIN] Redirecionando para {targetUrl}");
+
+                                    using var client = new HttpClient();
+                                    var body = await new StreamReader(context.Request.Body).ReadToEndAsync();
+                                    var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+                                    try
+                                    {
+                                        var response = await client.PostAsync(targetUrl, content);
+                                        context.Response.StatusCode = (int)response.StatusCode;
+                                        var responseBody = await response.Content.ReadAsStringAsync();
+                                        context.Response.ContentType = "application/json";
+                                        await context.Response.WriteAsync(responseBody);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Logger.LogError($"[AUTH PROXY ERROR] {ex.Message}");
+                                        context.Response.StatusCode = 500;
+                                        await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
+                                    }
+                                });
+                            });
                             break;
                     }
-
-                    app.UseEndpoints(endpoints =>
-                    {
-                        Logger.LogInfo("[ENDPOINTS] Mapeando endpoints gerais");
-
-                        if (proxySettings.Mode == 3)
-                        {
-                            endpoints.MapPost("/auth/login", async context =>
-                            {
-                                var configuration = context.RequestServices.GetRequiredService<IConfiguration>();
-                                var authBaseUrl = configuration.GetSection("AnakimAuthService")["BaseUrl"];
-                                Logger.LogInfo("[AUTH LOGIN] Endpoint /auth/login recebido");
-
-                                if (string.IsNullOrWhiteSpace(authBaseUrl))
-                                {
-                                    Logger.LogError("[AUTH LOGIN] Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
-                                    context.Response.StatusCode = 500;
-                                    await context.Response.WriteAsync("Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
-                                    return;
-                                }
-
-                                var targetUrl = $"{authBaseUrl}/login";
-                                Logger.LogInfo($"[AUTH LOGIN] Redirecionando para {targetUrl}");
-
-                                using var client = new HttpClient();
-                                var body = await new StreamReader(context.Request.Body).ReadToEndAsync();
-                                var content = new StringContent(body, Encoding.UTF8, "application/json");
-
-                                try
-                                {
-                                    var response = await client.PostAsync(targetUrl, content);
-                                    context.Response.StatusCode = (int)response.StatusCode;
-                                    var responseBody = await response.Content.ReadAsStringAsync();
-                                    context.Response.ContentType = "application/json";
-                                    await context.Response.WriteAsync(responseBody);
-                                }
-                                catch (Exception ex)
-                                {
-                                    Logger.LogError($"[AUTH PROXY ERROR] {ex.Message}");
-                                    context.Response.StatusCode = 500;
-                                    await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
-                                }
-                            });
-                        }
-                    });
                 });
             })
             .ConfigureServices((hostingContext, services) =>
@@ -179,6 +208,7 @@ class Program
                 });
 
                 services.AddHttpClient();
+                services.AddControllers();
                 services.AddSingleton(proxySettings);
                 services.AddSingleton<ScriptExecutorService>();
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();

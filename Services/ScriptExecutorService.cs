@@ -1,6 +1,7 @@
 ﻿using Microsoft.CodeAnalysis.CSharp.Scripting;
 using Microsoft.CodeAnalysis.Scripting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Reflection;
 using AnakimOrchestrator.Infrastructure;
@@ -19,15 +20,20 @@ namespace AnakimOrchestrator.Services
     {
         private readonly IConfiguration _configuration;
         private readonly IAnakimAccessProvider _dbProvider;
+        private readonly ILogger<ScriptExecutorService> _logger;
         private static readonly string BaseScriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts");
 
         // Cache de scripts compilados
         private static readonly ConcurrentDictionary<string, (Script<object> Script, DateTime LastWrite)> _scriptCache = new();
 
-        public ScriptExecutorService(IConfiguration configuration, IAnakimAccessProvider dbProvider)
+        public ScriptExecutorService(
+            IConfiguration configuration,
+            IAnakimAccessProvider dbProvider,
+            ILogger<ScriptExecutorService> logger)
         {
             _configuration = configuration;
             _dbProvider = dbProvider;
+            _logger = logger;
         }
 
         public async Task<object?> RunScriptAsync(string scriptName, IDictionary<string, object> args, int? languageOverride = null)
@@ -48,7 +54,12 @@ namespace AnakimOrchestrator.Services
             var scriptPath = Path.Combine(BaseScriptPath, "CSharp", $"{scriptName}.csx");
 
             if (!File.Exists(scriptPath))
+            {
+                _logger.LogError("Script '{ScriptName}' não encontrado no caminho {ScriptPath}", scriptName, scriptPath);
                 throw new FileNotFoundException($"Script '{scriptName}' não encontrado em CSharp.");
+            }
+
+            _logger.LogInformation("Iniciando execução do script '{ScriptName}'", scriptName);
 
             var lastWriteTime = File.GetLastWriteTimeUtc(scriptPath);
 
@@ -60,15 +71,20 @@ namespace AnakimOrchestrator.Services
                     .AddImports("System", "System.Collections.Generic")
                     .AddReferences(AppDomain.CurrentDomain.GetAssemblies()
                         .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location)))
-                    .AddReferences("Microsoft.CSharp"); // ✅ Referência necessária para uso de dynamic
+                    .AddReferences("Microsoft.CSharp");
 
                 var compiledScript = CSharpScript.Create(code, options, typeof(Globals));
 
                 var diagnostics = compiledScript.GetCompilation().GetDiagnostics();
                 if (diagnostics.Any(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error))
-                    throw new Exception("Erro ao compilar script: " + string.Join(", ", diagnostics));
+                {
+                    var errors = string.Join(", ", diagnostics);
+                    _logger.LogError("Erro de compilação no script '{ScriptName}': {Errors}", scriptName, errors);
+                    throw new Exception("Erro ao compilar script: " + errors);
+                }
 
                 _scriptCache[scriptPath] = (compiledScript, lastWriteTime);
+                _logger.LogInformation("Script '{ScriptName}' compilado e armazenado em cache", scriptName);
             }
 
             var (script, _) = _scriptCache[scriptPath];
@@ -79,11 +95,13 @@ namespace AnakimOrchestrator.Services
             };
 
             var scriptState = await script.RunAsync(globals);
-
             var scriptObject = scriptState?.ReturnValue;
 
             if (scriptObject == null)
+            {
+                _logger.LogWarning("Script '{ScriptName}' executado, mas retornou null", scriptName);
                 throw new Exception("Script executado, mas não retornou uma instância.");
+            }
 
             var runMethod = scriptObject.GetType().GetMethod(
                 "Run",
@@ -91,17 +109,20 @@ namespace AnakimOrchestrator.Services
             );
 
             if (runMethod == null)
+            {
+                _logger.LogError("Script '{ScriptName}' não possui método 'Run'", scriptName);
                 throw new Exception("Método 'Run' não encontrado na instância retornada.");
+            }
 
             try
             {
+                _logger.LogInformation("Executando método Run do script '{ScriptName}'", scriptName);
                 var resultTask = (Task<object>)runMethod.Invoke(scriptObject, new object[] { globals });
                 return await resultTask;
-
             }
             catch (TargetInvocationException ex)
             {
-                Logger.LogError($"Erro no script: {ex.InnerException?.Message}");
+                _logger.LogError(ex.InnerException ?? ex, "Erro ao executar o script '{ScriptName}'", scriptName);
                 throw new Exception($"Erro ao executar método Run: {ex.InnerException?.Message}", ex);
             }
         }
