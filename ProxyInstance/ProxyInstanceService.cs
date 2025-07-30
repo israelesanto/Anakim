@@ -9,12 +9,12 @@ using AnakimOrchestrator.Infrastructure;
 
 namespace AnakimOrchestrator.ProxyInstance
 {
-    // This background service acts as a Proxy Instance: it listens to Application Handlers and reports stats to the Traffic Manager
     public class ProxyInstanceService : BackgroundService
     {
-        private readonly string _tmHost;
+        private readonly string? _tmHost;
         private readonly int _tmPort;
         private readonly int _piPort;
+        private readonly bool _hasTrafficManager;
         private TcpClient? _client;
         private NetworkStream? _stream;
         private TcpListener _listener;
@@ -24,34 +24,40 @@ namespace AnakimOrchestrator.ProxyInstance
 
         public ProxyInstanceService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService, InstanceRankingManager rankingManager)
         {
-            _listener = new TcpListener(IPAddress.Any, _piPort);
-            _rankingManager = rankingManager;
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                 ?? throw new InvalidOperationException("ProxySettings is not configured properly in appsettings.json.");
 
+            _hasTrafficManager = _proxySettings.HasTrafficManager;
             _piPort = _proxySettings.Port;
+
             if (_piPort <= 0)
                 throw new InvalidOperationException("Invalid Proxy Instance port configuration.");
 
-            var tmSettings = configuration.GetSection("ProxySettings:TrafficManager");
-            _tmHost = tmSettings.GetValue<string>("Host") ?? throw new InvalidOperationException("Traffic Manager host is missing in configuration.");
-            _tmPort = tmSettings.GetValue<int>("Port");
+            if (_hasTrafficManager)
+            {
+                var tmSettings = configuration.GetSection("ProxySettings:TrafficManager");
+                _tmHost = tmSettings.GetValue<string>("Host") ?? throw new InvalidOperationException("Traffic Manager host is missing in configuration.");
+                _tmPort = tmSettings.GetValue<int>("Port");
 
-            if (string.IsNullOrEmpty(_tmHost) || _tmPort <= 0)
-                throw new InvalidOperationException("Invalid Traffic Manager configuration in ProxySettings.");
+                if (string.IsNullOrEmpty(_tmHost) || _tmPort <= 0)
+                    throw new InvalidOperationException("Invalid Traffic Manager configuration in ProxySettings.");
+            }
 
             _nodeStatisticsService = nodeStatisticsService ?? throw new ArgumentNullException(nameof(nodeStatisticsService));
+            _rankingManager = rankingManager;
         }
 
-        // Entry point for the background service
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("ProxyInstanceService started.");
-            StartListener(stoppingToken);                // Start listening for Application Handlers
-            await ExecuteConnectionAsync(stoppingToken); // Connect to the Traffic Manager
+            StartListener(stoppingToken);
+
+            if (_hasTrafficManager)
+                await ExecuteConnectionAsync(stoppingToken);
+            else
+                Logger.LogInfo("HasTrafficManager is false, skipping connection to Traffic Manager.");
         }
 
-        // Starts the TCP listener for receiving statistics from Application Handlers
         private void StartListener(CancellationToken stoppingToken)
         {
             try
@@ -67,7 +73,6 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
-        // Accepts incoming TCP clients asynchronously
         private async Task AcceptClientsAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -89,7 +94,6 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
-        // Handles communication with a connected Application Handler
         private async Task HandleClientAsync(TcpClient client)
         {
             NodeStatistics? lastReceivedStats = null;
@@ -144,7 +148,6 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
-        // Connects to the Traffic Manager and sends this instance's statistics periodically
         private async Task ExecuteConnectionAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -153,7 +156,7 @@ namespace AnakimOrchestrator.ProxyInstance
                 {
                     Logger.LogInfo($"Attempting to connect to Traffic Manager at {_tmHost}:{_tmPort}...");
                     _client = new TcpClient();
-                    await _client.ConnectAsync(_tmHost, _tmPort, stoppingToken);
+                    await _client.ConnectAsync(_tmHost!, _tmPort, stoppingToken);
 
                     _stream = _client.GetStream();
                     Logger.LogSuccess("Connected to Traffic Manager!");
@@ -169,7 +172,6 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
-        // Sends process and system statistics to the Traffic Manager continuously
         private async Task SendStatisticsPeriodically(CancellationToken stoppingToken)
         {
             try
@@ -190,7 +192,7 @@ namespace AnakimOrchestrator.ProxyInstance
 
                     if (_stream is null)
                     {
-                        Logger.LogError("Stram is null.");
+                        Logger.LogError("Stream is null.");
                         return;
                     }
 
@@ -207,7 +209,6 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
-        // Deserializes and updates the ranking with the received statistics
         private NodeStatistics? ProcessStatistics(string jsonMessage)
         {
             try
@@ -249,13 +250,11 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
-        // Exposes the best-ranked Application Handler to other components
         public NodeStatistics? GetBestApplicationHandler()
         {
             return _rankingManager.GetBestInstance();
         }
 
-        // Cleans up the connection to the Traffic Manager
         private void CleanupConnection()
         {
             _stream?.Close();
@@ -265,7 +264,6 @@ namespace AnakimOrchestrator.ProxyInstance
             Logger.LogWarning("Connection to Traffic Manager cleaned up.");
         }
 
-        // Called when the service is stopping
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             Logger.LogInfo("ProxyInstanceService is stopping...");
@@ -274,7 +272,6 @@ namespace AnakimOrchestrator.ProxyInstance
             await base.StopAsync(cancellationToken);
         }
 
-        // Sanitizes the statistics to prevent invalid negative values
         private static void ValidateStatistics(NodeStatistics statistics)
         {
             if (statistics.ProcessStat == null)
@@ -299,11 +296,17 @@ namespace AnakimOrchestrator.ProxyInstance
                 statistics.System.TotalMemoryMB = 0;
         }
 
-        // Manual trigger to start connection to Traffic Manager
         public async Task ConnectToTrafficManager(CancellationToken stoppingToken)
         {
-            Logger.LogInfo("Starting manual connection to Traffic Manager...");
-            await ExecuteConnectionAsync(stoppingToken);
+            if (_hasTrafficManager)
+            {
+                Logger.LogInfo("Starting manual connection to Traffic Manager...");
+                await ExecuteConnectionAsync(stoppingToken);
+            }
+            else
+            {
+                Logger.LogInfo("HasTrafficManager is false, skipping manual connection.");
+            }
         }
     }
 }

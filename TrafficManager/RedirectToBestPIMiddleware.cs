@@ -2,7 +2,7 @@
 using AnakimOrchestrator.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using System.Linq;
+using System.Net;
 
 namespace AnakimOrchestrator.TrafficManager
 {
@@ -12,18 +12,21 @@ namespace AnakimOrchestrator.TrafficManager
         private readonly RequestDelegate _next;
         private readonly InstanceRankingManager _rankingManager;
         private readonly FailoverManager _failoverManager;
+        private readonly DockerSettings _dockerSettings;
         private readonly IConfiguration _configuration;
 
         public RedirectToBestPIMiddleware(
             RequestDelegate next,
             InstanceRankingManager rankingManager,
             FailoverManager failoverManager,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            DockerSettings dockerSettings) // mantido por compatibilidade, mas não usado mais
         {
             _next = next;
             _rankingManager = rankingManager;
             _failoverManager = failoverManager;
             _configuration = configuration;
+            _dockerSettings = dockerSettings;
         }
 
         public async Task InvokeAsync(HttpContext context)
@@ -44,7 +47,7 @@ namespace AnakimOrchestrator.TrafficManager
 
             var handlerList = rankedInstances.Select(pi => new ApplicationHandlerInfo
             {
-                InstanceId = pi.ProcessStat?.InstanceId ?? "unknow",
+                InstanceId = pi.ProcessStat?.InstanceId ?? "unknown",
                 Url = $"{protocol}://{pi.SenderIp}:{pi.Port?.GeneralPort ?? 0}",
                 Ranking = pi.ProcessStat?.PrivateMemoryMB ?? 0
             }).ToList();
@@ -58,22 +61,19 @@ namespace AnakimOrchestrator.TrafficManager
                 return;
             }
 
-            bool redirectUseSenderIp = _configuration.GetValue<bool>("ProxySettings:RedirectUseSenderIp");
-            var redirectHost = redirectUseSenderIp ? bestInstance.SenderIp : "localhost";
+            string redirectHost = ProxyUtils.GetRedirectHost(_configuration, bestInstance);
+
+            Logger.LogInfo($"[ROUTE] Redirecionando para host: {redirectHost}");
 
             var targetUrl = $"{protocol}://{redirectHost}:{bestInstance.Port.GeneralPort}{context.Request.Path}{context.Request.QueryString}";
+            Logger.LogInfo($"[ROUTE] URL final: {targetUrl}");
 
-
-            Logger.LogInfo($"Redirecting request to: {targetUrl}");
-
-            // Se for /scripts/*, encaminha o corpo corretamente
             if (context.Request.Path.StartsWithSegments("/scripts"))
             {
                 await ProxyUtils.RedirectWithBodyAsync(context, targetUrl);
                 return;
             }
 
-            // Para demais requisições, usa redirecionamento padrão
             context.Response.StatusCode = StatusCodes.Status307TemporaryRedirect;
             context.Response.Headers["Location"] = targetUrl;
         }

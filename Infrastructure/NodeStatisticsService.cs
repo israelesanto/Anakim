@@ -5,21 +5,22 @@ using Microsoft.Extensions.Configuration;
 
 namespace AnakimOrchestrator.Infrastructure
 {
-    // Service responsible for collecting statistics about the current process and system
     public class NodeStatisticsService : INodeStatisticsService
     {
         private readonly IConfiguration _configuration;
         private readonly ProxySettings _proxySettings;
+        private readonly DockerSettings _dockerSettings;
 
-        // Constructor that loads proxy settings from configuration
         public NodeStatisticsService(IConfiguration configuration)
         {
             _configuration = configuration;
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                 ?? throw new InvalidOperationException("ProxySettings not configured.");
+
+            _dockerSettings = configuration.GetSection("Docker").Get<DockerSettings>()
+                ?? new DockerSettings(); // fallback em caso de ausência
         }
 
-        // Gathers and returns statistics for this running instance
         public NodeStatistics CollectStatistics()
         {
             var process = Process.GetCurrentProcess();
@@ -27,7 +28,8 @@ namespace AnakimOrchestrator.Infrastructure
             return new NodeStatistics
             {
                 Timestamp = DateTime.UtcNow,
-                SenderIp = GetLocalIpAddress(),
+                SenderIp = GetContainerAwareIp(),
+                ContainerName = Environment.GetEnvironmentVariable("HOSTNAME") ?? Dns.GetHostName(),
 
                 SenderPort = new NodeStatistics.PortsInfo
                 {
@@ -59,8 +61,34 @@ namespace AnakimOrchestrator.Infrastructure
             };
         }
 
+        private string GetContainerAwareIp()
+        {
+            if (_dockerSettings.Enabled && _dockerSettings.UseInternalNetwork)
+            {
+                if (!string.IsNullOrWhiteSpace(_dockerSettings.ContainerDnsName))
+                {
+                    try
+                    {
+                        var entry = Dns.GetHostEntry(_dockerSettings.ContainerDnsName);
+                        var ip = entry.AddressList
+                                      .FirstOrDefault(ip =>
+                                          ip.AddressFamily == AddressFamily.InterNetwork &&
+                                          (!_dockerSettings.PreferContainerIp || !IPAddress.IsLoopback(ip))
+                                      );
 
-        // Tries to obtain a non-loopback IPv4 address of the current machine
+                        if (ip != null)
+                            return ip.ToString();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogWarning($"[Docker] Falha ao resolver DNS do container '{_dockerSettings.ContainerDnsName}': {ex.Message}");
+                    }
+                }
+            }
+
+            return GetLocalIpAddress();
+        }
+
         private string GetLocalIpAddress()
         {
             try
@@ -83,7 +111,6 @@ namespace AnakimOrchestrator.Infrastructure
             return "127.0.0.1";
         }
 
-        // Returns current process CPU usage percentage
         private double GetCpuUsage()
         {
             var process = Process.GetCurrentProcess();
@@ -102,7 +129,6 @@ namespace AnakimOrchestrator.Infrastructure
             return Math.Round(cpuUsageTotal * 100, 2);
         }
 
-        // Returns overall CPU usage of the system
         private double GetSystemCpuUsage()
         {
             var process = Process.GetCurrentProcess();
@@ -121,14 +147,12 @@ namespace AnakimOrchestrator.Infrastructure
             return Math.Round(cpuUsageTotal * 100, 2);
         }
 
-        // Returns estimated available memory based on .NET GC info
         private double GetAvailableMemory()
         {
             var gcMemory = GC.GetGCMemoryInfo();
             return gcMemory.TotalAvailableMemoryBytes / (1024.0 * 1024.0);
         }
 
-        // Returns total memory used by the heap (does not include all system memory)
         private double GetTotalMemory()
         {
             var gcMemory = GC.GetGCMemoryInfo();

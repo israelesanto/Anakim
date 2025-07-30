@@ -14,6 +14,7 @@ namespace AnakimOrchestrator.Infrastructure
         public ProcessStatistics? ProcessStat { get; set; }
         public SystemStatistics? System { get; set; }
         public PortsInfo? Port { get; set; }
+        public string ContainerName { get; set; }
 
         public class PortsInfo
         {

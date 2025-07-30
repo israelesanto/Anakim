@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using System.Net.Http.Headers;
 
 namespace AnakimOrchestrator.Infrastructure
@@ -81,5 +82,27 @@ namespace AnakimOrchestrator.Infrastructure
             await context.Response.Body.WriteAsync(responseBody);
             await context.Response.Body.FlushAsync(); 
         }
+
+        // ... outros métodos como RedirectWithBodyAsync ...
+        /// <summary>
+        /// Determina o host de redirecionamento com base no modo configurado:
+        /// 1 = localhost, 2 = SenderIp, 3 = ContainerName (fallback para SenderIp)
+        /// </summary>
+        public static string GetRedirectHost(IConfiguration config, NodeStatistics instance)
+        {
+            var mode = config.GetValue<int>("ProxySettings:RedirectionMode");
+
+            return mode switch
+            {
+                1 => "localhost", // Sempre força localhost (uso externo)
+                2 => instance.SenderIp ?? "localhost", // Usa IP real enviado por quem respondeu (caso de múltiplos servidores)
+                3 => !string.IsNullOrWhiteSpace(instance.ContainerName)
+                        ? instance.ContainerName
+                        : instance.SenderIp ?? "localhost", // Usa DNS do container (modo docker)
+                _ => instance.SenderIp ?? "localhost"
+            };
+        }
+
+
     }
 }

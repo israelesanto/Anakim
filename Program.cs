@@ -157,7 +157,7 @@ class Program
                                         return;
                                     }
 
-                                    var targetUrl = $"{authBaseUrl}/login";
+                                    var targetUrl = $"{authBaseUrl}/auth/login";
                                     Logger.LogInfo($"[AUTH LOGIN] Redirecionando para {targetUrl}");
 
                                     using var client = new HttpClient();
@@ -192,6 +192,8 @@ class Program
                 var proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                     ?? throw new InvalidOperationException("ProxySettings not configured properly.");
 
+                var dockerSettings = configuration.GetSection("DockerSettings").Get<DockerSettings>() ?? new DockerSettings();
+
                 var allowedOrigins = configuration
                     .GetSection("Cors:AllowedOrigins")
                     .Get<string[]>();
@@ -210,9 +212,11 @@ class Program
                 services.AddHttpClient();
                 services.AddControllers();
                 services.AddSingleton(proxySettings);
+                services.AddSingleton(dockerSettings);
                 services.AddSingleton<ScriptExecutorService>();
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
                 services.AddSingleton<InstanceRankingManager>();
+                services.AddSingleton<FailoverManager>();
 
                 services.AddSingleton<IAnakimAccessProvider>(sp =>
                 {
@@ -225,17 +229,14 @@ class Program
                     case 1:
                         Logger.LogInfo("Configuring as Traffic Manager");
                         services.AddHostedService<TrafficManagerService>();
-                        services.AddSingleton<FailoverManager>();
                         break;
                     case 2:
                         Logger.LogInfo("Configuring as Proxy Instance");
                         services.AddHostedService<ProxyInstanceService>();
-                        services.AddSingleton<FailoverManager>();
                         break;
                     case 3:
                         Logger.LogInfo("Configuring as Application Handler");
                         services.AddHostedService<ApplicationHandlerService>();
-                        services.AddSingleton<ScriptExecutorService>();
                         break;
                     default:
                         throw new InvalidOperationException($"Invalid mode: {proxySettings.Mode}");

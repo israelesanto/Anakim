@@ -8,11 +8,11 @@ using Microsoft.Extensions.Hosting;
 
 namespace AnakimOrchestrator.Infrastructure
 {
-    // Background service that runs the Application Handler role
     public class ApplicationHandlerService : BackgroundService
     {
-        private readonly string _piHost;
+        private readonly string? _piHost;
         private readonly int _piPort;
+        private readonly bool _hasProxyInstance;
         private readonly string _instanceId;
         private readonly string _instanceName;
         private TcpClient? _client;
@@ -28,18 +28,23 @@ namespace AnakimOrchestrator.Infrastructure
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                 ?? throw new InvalidOperationException("The 'ProxySettings' section is missing or malformed in appsettings.json.");
 
-            var proxyInstanceSettings = configuration.GetSection("ProxySettings:ProxyInstance");
+            _hasProxyInstance = _proxySettings.HasProxyInstance;
 
-            _piHost = proxyInstanceSettings.GetValue<string>("Host")
-                ?? throw new InvalidOperationException("The 'Host' section is missing or malformed in appsettings.json.");
+            if (_hasProxyInstance)
+            {
+                var proxyInstanceSettings = configuration.GetSection("ProxySettings:ProxyInstance");
 
-            _piPort = proxyInstanceSettings.GetValue<int>("Port");
+                _piHost = proxyInstanceSettings.GetValue<string>("Host")
+                    ?? throw new InvalidOperationException("The 'Host' section is missing or malformed in appsettings.json.");
+
+                _piPort = proxyInstanceSettings.GetValue<int>("Port");
+
+                if (string.IsNullOrEmpty(_piHost) || _piPort <= 0)
+                    throw new InvalidOperationException("Invalid Proxy Instance configuration in ProxySettings.");
+            }
 
             _instanceId = _proxySettings.InstanceId ?? "unknown";
             _instanceName = _proxySettings.InstanceName ?? "unknown";
-
-            if (string.IsNullOrEmpty(_piHost) || _piPort <= 0)
-                throw new InvalidOperationException("Invalid Proxy Instance configuration in ProxySettings.");
 
             if (string.IsNullOrEmpty(_instanceId) || string.IsNullOrEmpty(_instanceName))
                 throw new InvalidOperationException("InstanceId or InstanceName is not configured in ProxySettings.");
@@ -47,22 +52,28 @@ namespace AnakimOrchestrator.Infrastructure
             _nodeStatisticsService = nodeStatisticsService ?? throw new ArgumentNullException(nameof(nodeStatisticsService));
         }
 
-
-        // Can be triggered manually to start connection (alternative entry point)
         public async Task ConnectToProxyInstance(CancellationToken stoppingToken)
         {
-            Logger.LogInfo("Starting connection to Proxy Instance...");
-            await ExecuteConnectionAsync(stoppingToken);
+            if (_hasProxyInstance)
+            {
+                Logger.LogInfo("Starting connection to Proxy Instance...");
+                await ExecuteConnectionAsync(stoppingToken);
+            }
+            else
+            {
+                Logger.LogInfo("HasProxyInstance is false, skipping connection to Proxy Instance.");
+            }
         }
 
-        // Default background service execution entry point
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("ApplicationHandlerService started.");
-            await ExecuteConnectionAsync(stoppingToken);
+            if (_hasProxyInstance)
+                await ExecuteConnectionAsync(stoppingToken);
+            else
+                Logger.LogInfo("HasProxyInstance is false, skipping automatic connection to Proxy Instance.");
         }
 
-        // Handles the connection and reconnection loop to the Proxy Instance
         private async Task ExecuteConnectionAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -71,24 +82,22 @@ namespace AnakimOrchestrator.Infrastructure
                 {
                     Logger.LogInfo($"Attempting to connect to Proxy Instance at {_piHost}:{_piPort}...");
                     _client = new TcpClient();
-                    await _client.ConnectAsync(_piHost, _piPort, stoppingToken);
+                    await _client.ConnectAsync(_piHost!, _piPort, stoppingToken);
 
                     _stream = _client.GetStream();
                     Logger.LogSuccess("Connected to Proxy Instance!");
 
-                    // Begins sending statistics periodically
                     await SendStatisticsPeriodically(stoppingToken);
                 }
                 catch (Exception ex)
                 {
                     Logger.LogError($"Failed to connect to Proxy Instance: {ex.Message}");
                     CleanupConnection();
-                    await Task.Delay(5000, stoppingToken); // Wait before retrying
+                    await Task.Delay(5000, stoppingToken);
                 }
             }
         }
 
-        // Sends system and process statistics in JSON format to the Proxy Instance
         private async Task SendStatisticsPeriodically(CancellationToken stoppingToken)
         {
             try
@@ -114,7 +123,6 @@ namespace AnakimOrchestrator.Infrastructure
                     await _stream.WriteAsync(data, stoppingToken);
                     Logger.LogInfo($"Statistics sent to Proxy Instance: {statistics.ProcessStat.InstanceName}");
 
-                    // Wait based on configured interval (e.g., 5000 ms)
                     await Task.Delay(_proxySettings.TimeUpdate, stoppingToken);
                 }
             }
@@ -125,7 +133,6 @@ namespace AnakimOrchestrator.Infrastructure
             }
         }
 
-        // Not currently used, but would estimate CPU usage for a process
         private double GetProcessCpuUsage(Process process)
         {
             var totalProcessorTime = process.TotalProcessorTime.TotalMilliseconds;
@@ -133,7 +140,6 @@ namespace AnakimOrchestrator.Infrastructure
             return (totalProcessorTime / elapsedMilliseconds) * 100 / Environment.ProcessorCount;
         }
 
-        // Struct for querying system memory statistics (used with GlobalMemoryStatusEx)
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         private class MEMORYSTATUSEX
         {
@@ -148,11 +154,9 @@ namespace AnakimOrchestrator.Infrastructure
             public ulong ullAvailExtendedVirtual;
         }
 
-        // External Win32 API function to get memory usage
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
 
-        // Cleans up the TCP connection and network stream
         private void CleanupConnection()
         {
             _stream?.Close();
@@ -162,7 +166,6 @@ namespace AnakimOrchestrator.Infrastructure
             Logger.LogWarning("Connection to Proxy Instance cleaned up.");
         }
 
-        // Called when the service is stopping
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             Logger.LogInfo("ApplicationHandlerService is stopping...");
