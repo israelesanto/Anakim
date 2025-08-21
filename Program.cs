@@ -7,7 +7,6 @@ using Microsoft.Extensions.Logging;
 using AnakimOrchestrator.Infrastructure;
 using AnakimOrchestrator.ProxyInstance;
 using System.Security.Cryptography.X509Certificates;
-using System.Text;
 using System.Text.Json;
 using AnakimOrchestrator.TrafficManager;
 using AnakimOrchestrator.Services;
@@ -15,13 +14,18 @@ using Microsoft.AspNetCore.Http;
 using AnakimSuite.AnakimAccessProvider;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
-using AnakimOrchestrator.Controllers;
+using System.Linq;
+using System.IO;
+using System;
+
+using TMResolver = AnakimOrchestrator.TrafficManager.TrafficManagerHelpers;
+using PIResolver = AnakimOrchestrator.ProxyInstance.ProxyInstanceHelpers;
 
 class Program
 {
     static async Task Main(string[] args)
     {
-        var builder = Host.CreateDefaultBuilder(args)
+        var host = Host.CreateDefaultBuilder(args)
             .UseWindowsService()
             .ConfigureAppConfiguration((hostingContext, config) =>
             {
@@ -44,48 +48,65 @@ class Program
 
                     if (useHttps)
                     {
-                        var pfxSection = configuration.GetSection("Certificate:Pfx");
-                        var pfxPath = pfxSection.GetValue<string>("Path");
-                        var password = pfxSection.GetValue<string>("Password");
-                        var pemSection = configuration.GetSection("Certificate:Pem");
-                        var certPath = pemSection.GetValue<string>("CertPath");
-                        var keyPath = pemSection.GetValue<string>("KeyPath");
-
-                        X509Certificate2 certificate;
-
-                        Logger.LogInfo($"[CERT DEBUG] pfxPath: {pfxPath}");
-                        Logger.LogInfo($"[CERT DEBUG] password: {(string.IsNullOrEmpty(password) ? "NULL ou vazio" : "****")}");
-
-                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                        try
                         {
-                            Logger.LogInfo("[CERT] Ambiente Windows - carregando .pfx");
-                            certificate = new X509Certificate2(pfxPath, password);
-                        }
-                        else
-                        {
-                            Logger.LogInfo("[CERT] Ambiente Linux - carregando .pem + .key");
-                            var pemCert = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+                            // Carregar certificado conforme SO
+                            var pfxSection = configuration.GetSection("Certificate:Pfx");
+                            var pemSection = configuration.GetSection("Certificate:Pem");
 
-                            if (!pemCert.HasPrivateKey)
+                            X509Certificate2 certificate;
+
+                            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                             {
-                                var rsa = RSA.Create();
-                                rsa.ImportFromPem(File.ReadAllText(keyPath));
-                                certificate = pemCert.CopyWithPrivateKey(rsa);
+                                var pfxPath = pfxSection.GetValue<string>("Path");
+                                var password = pfxSection.GetValue<string>("Password");
+
+                                if (string.IsNullOrWhiteSpace(pfxPath) || !File.Exists(pfxPath))
+                                    throw new FileNotFoundException($"Arquivo PFX não encontrado: {pfxPath}");
+
+                                Logger.LogInfo("[CERT] Windows - carregando .pfx");
+                                certificate = new X509Certificate2(pfxPath, password);
                             }
                             else
                             {
-                                certificate = pemCert;
-                            }
-                        }
+                                var certPath = pemSection.GetValue<string>("CertPath");
+                                var keyPath = pemSection.GetValue<string>("KeyPath");
 
-                        options.ListenAnyIP(port, listenOptions => listenOptions.UseHttps(certificate));
+                                if (string.IsNullOrWhiteSpace(certPath) || !File.Exists(certPath))
+                                    throw new FileNotFoundException($"Arquivo PEM (cert) não encontrado: {certPath}");
+                                if (string.IsNullOrWhiteSpace(keyPath) || !File.Exists(keyPath))
+                                    throw new FileNotFoundException($"Arquivo PEM (key) não encontrado: {keyPath}");
+
+                                Logger.LogInfo("[CERT] Linux - carregando .pem + .key");
+                                var pemCert = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+
+                                if (!pemCert.HasPrivateKey)
+                                {
+                                    using var rsa = RSA.Create();
+                                    rsa.ImportFromPem(File.ReadAllText(keyPath));
+                                    certificate = pemCert.CopyWithPrivateKey(rsa);
+                                }
+                                else
+                                {
+                                    certificate = pemCert;
+                                }
+                            }
+
+                            options.ListenAnyIP(port, lo => lo.UseHttps(certificate));
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogError("[CERT] Falha ao carregar certificado: " + ex.Message);
+                            Logger.LogInfo("[CERT] Fallback para HTTP (dev). Defina Certificate no appsettings para HTTPS.");
+                            options.ListenAnyIP(port); // fallback
+                        }
                     }
                     else
                     {
                         options.ListenAnyIP(port);
                     }
                 })
-                .Configure(app =>
+                .Configure((app) =>
                 {
                     var config = app.ApplicationServices.GetRequiredService<IConfiguration>();
                     var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>()
@@ -93,94 +114,114 @@ class Program
 
                     Logger.LogInfo($"[STARTUP] Executando modo: {proxySettings.Mode}");
 
-                    if (proxySettings.Mode == 3) // AH
+                    // AH pode servir estáticos
+                    if (proxySettings.Mode == 3)
                     {
+                        // 👉 Rewrite: /foo -> /foo.html se existir
+                        app.Use(async (ctx, next) =>
+                        {
+                            if (HttpMethods.IsGet(ctx.Request.Method))
+                            {
+                                var path = ctx.Request.Path.Value;
+                                if (!string.IsNullOrEmpty(path) &&
+                                    path != "/" &&
+                                    !Path.HasExtension(path))
+                                {
+                                    // ✅ pegue o ambiente via DI (IApplicationBuilder não tem .Environment)
+                                    var env = app.ApplicationServices.GetRequiredService<IWebHostEnvironment>();
+                                    var webRoot = env.WebRootPath ?? Path.Combine(AppContext.BaseDirectory, "wwwroot");
+
+                                    var candidate = Path.Combine(webRoot, path.TrimStart('/') + ".html");
+                                    if (File.Exists(candidate))
+                                    {
+                                        ctx.Request.Path = new PathString(path + ".html");
+                                    }
+                                }
+                            }
+                            await next();
+                        });
+
                         app.UseDefaultFiles();
                         app.UseStaticFiles();
+
                     }
 
+                    // CORS único (sem middleware manual duplicado)
                     app.UseCors();
-
-                    app.Use(async (context, next) =>
-                    {
-                        var origin = context.Request.Headers["Origin"].FirstOrDefault();
-                        if (!string.IsNullOrWhiteSpace(origin))
-                        {
-                            context.Response.Headers["Access-Control-Allow-Origin"] = origin;
-                            context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
-                            context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
-                            context.Response.Headers["Access-Control-Allow-Credentials"] = "true";
-                        }
-
-                        if (context.Request.Method == HttpMethods.Options)
-                        {
-                            context.Response.StatusCode = 204;
-                            await context.Response.CompleteAsync();
-                            return;
-                        }
-
-                        await next();
-                    });
-
-                    app.UseRouting();
 
                     switch (proxySettings.Mode)
                     {
-                        case 1:
-                            Logger.LogInfo("[PIPELINE] Ativando middleware de redirecionamento para PI");
-                            app.UseMiddleware<RedirectToBestPIMiddleware>();
-                            app.UseMiddleware<CorsProxyToPIMiddleware>();
-                            break;
-                        case 2:
-                            Logger.LogInfo("[PIPELINE] Ativando middleware de redirecionamento para AH");
-                            app.UseMiddleware<RedirectToBestAHMiddleware>();
-                            app.UseMiddleware<ProxyCorsRedirectMiddleware>();
-                            break;
-                        case 3:
-                            Logger.LogInfo("[PIPELINE] Application Handler ativado - registrando endpoints personalizados");
-                            app.UseEndpoints(endpoints =>
+                        case 1: // TM
+                        case 2: // PI
                             {
-                                Logger.LogInfo("[ENDPOINTS] Mapeando endpoints gerais");
-                                endpoints.MapControllers();
-
-                                endpoints.MapPost("/auth/login", async context =>
+                                // Terminal proxy (exceto /health)
+                                app.Use(async (ctx, next) =>
                                 {
-                                    var configuration = context.RequestServices.GetRequiredService<IConfiguration>();
-                                    var authBaseUrl = configuration.GetSection("AnakimAuthService")["BaseUrl"];
-                                    Logger.LogInfo("[AUTH LOGIN] Endpoint /auth/login recebido");
-
-                                    if (string.IsNullOrWhiteSpace(authBaseUrl))
+                                    if (!ctx.Request.Path.StartsWithSegments("/health"))
                                     {
-                                        Logger.LogError("[AUTH LOGIN] Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
-                                        context.Response.StatusCode = 500;
-                                        await context.Response.WriteAsync("Configuração 'AnakimAuthService:BaseUrl' não encontrada.");
-                                        return;
+                                        try
+                                        {
+                                            if (proxySettings.Mode == 1)
+                                            {
+                                                Logger.LogInfo("[PIPELINE] TM → melhor PI");
+                                                var targetUrl = await TMResolver.ResolveBestProxyInstanceUrlAsync(ctx, config);
+                                                await ProxyUtils.RedirectWithBodyAsync(ctx, targetUrl);
+                                            }
+                                            else
+                                            {
+                                                Logger.LogInfo("[PIPELINE] PI → melhor AH");
+                                                var targetUrl = await PIResolver.ResolveBestApplicationHandlerUrlAsync(ctx, config);
+                                                await ProxyUtils.RedirectWithBodyAsync(ctx, targetUrl);
+                                            }
+                                            return;
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Logger.LogError("Falha ao redirecionar: " + ex);
+                                            ctx.Response.StatusCode = StatusCodes.Status502BadGateway;
+                                            await ctx.Response.WriteAsync("Proxy error");
+                                            return;
+                                        }
                                     }
 
-                                    var targetUrl = $"{authBaseUrl}/auth/login";
-                                    Logger.LogInfo($"[AUTH LOGIN] Redirecionando para {targetUrl}");
-
-                                    using var client = new HttpClient();
-                                    var body = await new StreamReader(context.Request.Body).ReadToEndAsync();
-                                    var content = new StringContent(body, Encoding.UTF8, "application/json");
-
-                                    try
-                                    {
-                                        var response = await client.PostAsync(targetUrl, content);
-                                        context.Response.StatusCode = (int)response.StatusCode;
-                                        var responseBody = await response.Content.ReadAsStringAsync();
-                                        context.Response.ContentType = "application/json";
-                                        await context.Response.WriteAsync(responseBody);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Logger.LogError($"[AUTH PROXY ERROR] {ex.Message}");
-                                        context.Response.StatusCode = 500;
-                                        await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
-                                    }
+                                    await next();
                                 });
-                            });
-                            break;
+
+                                app.UseRouting();
+                                app.UseEndpoints(endpoints =>
+                                {
+                                    endpoints.MapGet("/health", async ctx =>
+                                    {
+                                        var role = proxySettings.Mode == 1 ? "TM" : "PI";
+                                        ctx.Response.ContentType = "application/json; charset=utf-8";
+                                        await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { role, ok = true }));
+                                    });
+                                });
+
+                                Logger.LogInfo("[ENDPOINTS] TM/PI sem controllers mapeados");
+                                break;
+                            }
+
+                        case 3: // AH
+                            {
+                                app.UseRouting();
+                                app.UseEndpoints(endpoints =>
+                                {
+                                    Logger.LogInfo("[ENDPOINTS] Controllers mapeados (AH)");
+                                    endpoints.MapControllers();
+                                    endpoints.MapGet("/health", async ctx =>
+                                    {
+                                        ctx.Response.ContentType = "application/json; charset=utf-8";
+                                        await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { role = "AH", ok = true }));
+                                    });
+                                });
+
+                                Logger.LogInfo("[PIPELINE] Application Handler ativado");
+                                break;
+                            }
+
+                        default:
+                            throw new InvalidOperationException($"Invalid mode: {proxySettings.Mode}");
                     }
                 });
             })
@@ -191,29 +232,58 @@ class Program
 
                 var proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                     ?? throw new InvalidOperationException("ProxySettings not configured properly.");
-
                 var dockerSettings = configuration.GetSection("DockerSettings").Get<DockerSettings>() ?? new DockerSettings();
 
-                var allowedOrigins = configuration
-                    .GetSection("Cors:AllowedOrigins")
-                    .Get<string[]>();
+                // --------- CORS (único) ----------
+                // Cookies exigem origem explícita (não pode AllowAnyOrigin + AllowCredentials).
+                var allowedOrigins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+                if (allowedOrigins == null || allowedOrigins.Length == 0)
+                {
+                    // fallback seguro para dev: a própria origem local (https://localhost:{GeneralPort})
+                    var port = configuration.GetValue<int>("GeneralPort", 7001);
+                    allowedOrigins = new[] { $"https://localhost:{port}" };
+                }
 
                 services.AddCors(options =>
                 {
                     options.AddDefaultPolicy(policy =>
-                    {
-                        policy.WithOrigins(allowedOrigins!)
+                        policy.WithOrigins(allowedOrigins)
                               .AllowAnyHeader()
                               .AllowAnyMethod()
-                              .AllowCredentials();
-                    });
+                              .AllowCredentials());
                 });
 
+                // --------- HttpClients ----------
+                // Default
                 services.AddHttpClient();
-                services.AddControllers();
+
+                // Nomeado para AuthService — aceita cert de dev (localhost). Em produção, use cert válido.
+                services.AddHttpClient("AuthClient")
+                    .ConfigurePrimaryHttpMessageHandler(sp =>
+                    {
+                        var baseUrl = configuration["AuthService:BaseUrl"] ?? "";
+                        var isLocal = baseUrl.Contains("://localhost", StringComparison.OrdinalIgnoreCase);
+                        var h = new SocketsHttpHandler();
+
+                        if (isLocal)
+                        {
+                            h.SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                            {
+                                RemoteCertificateValidationCallback = (_, __, ___, ____) => true
+                            };
+                        }
+                        return h;
+                    });
+
+                // --------- Serviços internos ----------
+                if (proxySettings.Mode == 3)
+                {
+                    services.AddControllers();
+                    services.AddSingleton<ScriptExecutorService>();
+                }
+
                 services.AddSingleton(proxySettings);
                 services.AddSingleton(dockerSettings);
-                services.AddSingleton<ScriptExecutorService>();
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
                 services.AddSingleton<InstanceRankingManager>();
                 services.AddSingleton<FailoverManager>();
@@ -245,6 +315,6 @@ class Program
             .Build();
 
         Logger.LogSuccess("Application initialized successfully!");
-        await builder.RunAsync();
+        await host.RunAsync();
     }
 }
