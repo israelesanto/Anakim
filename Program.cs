@@ -14,9 +14,7 @@ using Microsoft.AspNetCore.Http;
 using AnakimSuite.AnakimAccessProvider;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
-using System.Linq;
-using System.IO;
-using System;
+using AnakimSuite.AnakimMetadataManagment;
 
 using TMResolver = AnakimOrchestrator.TrafficManager.TrafficManagerHelpers;
 using PIResolver = AnakimOrchestrator.ProxyInstance.ProxyInstanceHelpers;
@@ -32,6 +30,11 @@ class Program
                 config.SetBasePath(AppContext.BaseDirectory)
                       .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
                       .AddEnvironmentVariables();
+
+                var configuration = config.Build();
+
+                //var databuilder = new AnakimDataBuilder(configuration);
+                //databuilder.Create();
             })
             .ConfigureLogging(logging =>
             {
@@ -214,6 +217,8 @@ class Program
                                         ctx.Response.ContentType = "application/json; charset=utf-8";
                                         await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { role = "AH", ok = true }));
                                     });
+
+                                    endpoints.MapFallbackToFile("index.html");
                                 });
 
                                 Logger.LogInfo("[PIPELINE] Application Handler ativado");
@@ -230,16 +235,17 @@ class Program
                 var configuration = hostingContext.Configuration;
                 Logger.Initialize(configuration);
 
+                // ✅ REGISTRA O ACCESSOR AQUI
+                services.AddHttpContextAccessor();
+
                 var proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                     ?? throw new InvalidOperationException("ProxySettings not configured properly.");
                 var dockerSettings = configuration.GetSection("DockerSettings").Get<DockerSettings>() ?? new DockerSettings();
 
                 // --------- CORS (único) ----------
-                // Cookies exigem origem explícita (não pode AllowAnyOrigin + AllowCredentials).
                 var allowedOrigins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
                 if (allowedOrigins == null || allowedOrigins.Length == 0)
                 {
-                    // fallback seguro para dev: a própria origem local (https://localhost:{GeneralPort})
                     var port = configuration.GetValue<int>("GeneralPort", 7001);
                     allowedOrigins = new[] { $"https://localhost:{port}" };
                 }
@@ -254,17 +260,13 @@ class Program
                 });
 
                 // --------- HttpClients ----------
-                // Default
                 services.AddHttpClient();
-
-                // Nomeado para AuthService — aceita cert de dev (localhost). Em produção, use cert válido.
                 services.AddHttpClient("AuthClient")
                     .ConfigurePrimaryHttpMessageHandler(sp =>
                     {
                         var baseUrl = configuration["AuthService:BaseUrl"] ?? "";
                         var isLocal = baseUrl.Contains("://localhost", StringComparison.OrdinalIgnoreCase);
                         var h = new SocketsHttpHandler();
-
                         if (isLocal)
                         {
                             h.SslOptions = new System.Net.Security.SslClientAuthenticationOptions
@@ -276,9 +278,11 @@ class Program
                     });
 
                 // --------- Serviços internos ----------
-                if (proxySettings.Mode == 3)
+                if (proxySettings.Mode == 3) // AH
                 {
                     services.AddControllers();
+
+                    // ✅ ScriptExecutorService depende de IHttpContextAccessor agora
                     services.AddSingleton<ScriptExecutorService>();
                 }
 
