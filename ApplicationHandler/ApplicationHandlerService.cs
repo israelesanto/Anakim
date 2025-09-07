@@ -87,7 +87,15 @@ namespace AnakimOrchestrator.Infrastructure
                     _stream = _client.GetStream();
                     Logger.LogSuccess("Connected to Proxy Instance!");
 
+                    // 🔔 HELLO: informa porta/host/esquema públicos ao PI (uma única vez por conexão)
+                    await SendHelloAsync(_stream, _configuration, _proxySettings);
+
+                    // ▶️ loop de métricas
                     await SendStatisticsPeriodically(stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -171,6 +179,44 @@ namespace AnakimOrchestrator.Infrastructure
             Logger.LogInfo("ApplicationHandlerService is stopping...");
             CleanupConnection();
             await base.StopAsync(cancellationToken);
+        }
+
+        private async Task SendHelloAsync(NetworkStream stream, IConfiguration cfg, ProxySettings proxy)
+        {
+            var useHttps = cfg.GetValue<bool>("UseHttps");
+            var publicPort = cfg.GetValue<int>("GeneralPort"); // porta pública em que o AH está ouvindo (ex.: 8001/8016)
+            var publicHost = GetFirstNonLoopbackIPv4() ?? "localhost";
+
+            var hello = new
+            {
+                InstanceId = proxy.InstanceId,       // "AH01"
+                InstanceName = proxy.InstanceName,   // "Application Handler 01"
+                PublicHost = publicHost,
+                PublicPort = publicPort,
+                UseHttps = useHttps
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(hello);
+            var data = Encoding.UTF8.GetBytes(json);
+            await stream.WriteAsync(data, 0, data.Length);
+            Logger.LogInfo($"[HELLO→PI] {hello.InstanceId} {publicHost}:{publicPort} https={(useHttps ? "on" : "off")}");
+        }
+
+        private static string? GetFirstNonLoopbackIPv4()
+        {
+            foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork &&
+                        !System.Net.IPAddress.IsLoopback(ua.Address))
+                    {
+                        return ua.Address.ToString();
+                    }
+                }
+            }
+            return null;
         }
     }
 }

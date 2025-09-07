@@ -168,12 +168,23 @@ class Program
                                             {
                                                 Logger.LogInfo("[PIPELINE] TM → melhor PI");
                                                 var targetUrl = await TMResolver.ResolveBestProxyInstanceUrlAsync(ctx, config);
+                                                if (string.IsNullOrEmpty(targetUrl))
+                                                {
+                                                    ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                                    await ctx.Response.WriteAsync("No Proxy Instance available");
+                                                    return;
+                                                }
                                                 await ProxyUtils.RedirectWithBodyAsync(ctx, targetUrl);
                                             }
                                             else
                                             {
-                                                Logger.LogInfo("[PIPELINE] PI → melhor AH");
+                                                Logger.LogInfo("[PIPELINE] PI → melhor AH]");
                                                 var targetUrl = await PIResolver.ResolveBestApplicationHandlerUrlAsync(ctx, config);
+                                                if (string.IsNullOrEmpty(targetUrl))
+                                                {
+                                                    // O resolver do PI já respondeu 503 ("No Application Handler available")
+                                                    return;
+                                                }
                                                 await ProxyUtils.RedirectWithBodyAsync(ctx, targetUrl);
                                             }
                                             return;

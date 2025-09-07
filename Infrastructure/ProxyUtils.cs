@@ -1,108 +1,209 @@
-﻿using Microsoft.AspNetCore.Http;
+﻿using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Net.Security;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using System.Net.Http.Headers;
 
 namespace AnakimOrchestrator.Infrastructure
 {
     public static class ProxyUtils
     {
-        private static readonly HashSet<string> RestrictedResponseHeaders = new()
+        private static readonly HashSet<string> RestrictedRequestHeaders = new(StringComparer.OrdinalIgnoreCase)
         {
-            "Transfer-Encoding",
-            "Content-Length",
-            "Keep-Alive",
-            "Connection",
-            "Proxy-Authenticate",
-            "Proxy-Authorization",
-            "TE",
-            "Trailer",
-            "Upgrade"
+            "Host","Connection","Proxy-Connection","Keep-Alive","Upgrade","TE","Trailer",
+            "Transfer-Encoding","Expect",
+            "Accept-Encoding", // HttpClient descompacta sozinho
+            "Content-Length"   // deixa o HttpClient calcular
         };
 
-        public static async Task RedirectWithBodyAsync(HttpContext context, string targetUrl)
+        private static readonly HashSet<string> RestrictedResponseHeaders = new(StringComparer.OrdinalIgnoreCase)
         {
-            var handler = new HttpClientHandler
+            "Transfer-Encoding","Connection","Keep-Alive","Proxy-Authenticate","Proxy-Authorization",
+            "TE","Trailer","Upgrade","Content-Length"
+        };
+
+        // ---------- HttpClient (pool) ----------
+        private static HttpClient CreateClient(bool acceptAnyCert)
+        {
+            var h = new SocketsHttpHandler
             {
-                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                AllowAutoRedirect = false,
+                UseCookies = false,
+                AutomaticDecompression = DecompressionMethods.All,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5),
+                MaxConnectionsPerServer = 1024
             };
 
-            using var httpClient = new HttpClient(handler);
-
-            // Habilita leitura múltipla do body
-            context.Request.EnableBuffering();
-
-            byte[] buffer;
-            if (context.Request.ContentLength != null && context.Request.ContentLength > 0)
+            if (acceptAnyCert)
             {
-                buffer = new byte[context.Request.ContentLength.Value];
-                await context.Request.Body.ReadAsync(buffer.AsMemory(0, buffer.Length));
-                context.Request.Body.Position = 0;
+                h.SslOptions = new SslClientAuthenticationOptions
+                {
+                    RemoteCertificateValidationCallback = (_, __, ___, ____) => true
+                };
+            }
+
+            return new HttpClient(h, disposeHandler: false)
+            {
+                Timeout = Timeout.InfiniteTimeSpan // controlado via CTS
+            };
+        }
+
+        private static readonly Lazy<HttpClient> ClientRelaxed = new(() => CreateClient(acceptAnyCert: true));
+        private static readonly Lazy<HttpClient> ClientStrict = new(() => CreateClient(acceptAnyCert: false));
+
+        private static bool IsPrivateOrLoopbackHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host)) return false;
+            if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+
+            if (IPAddress.TryParse(host, out var ip))
+            {
+                if (IPAddress.IsLoopback(ip)) return true;
+
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    var b = ip.GetAddressBytes();
+                    if (b[0] == 10) return true;                             // 10/8
+                    if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true; // 172.16/12
+                    if (b[0] == 192 && b[1] == 168) return true;              // 192.168/16
+                    if (b[0] == 169 && b[1] == 254) return true;              // 169.254/16
+                }
+            }
+            return false;
+        }
+
+        // ---------- Proxy principal ----------
+        public static async Task RedirectWithBodyAsync(HttpContext context, string targetUrl)
+        {
+            var cfg = context.RequestServices.GetService(typeof(IConfiguration)) as IConfiguration;
+            var target = new Uri(targetUrl);
+
+            // Anti-loop: impedir redirecionar para o próprio host/porta
+            if (context.Request.Host.HasValue)
+            {
+                var reqHost = context.Request.Host.Host;
+                var reqPort = context.Request.Host.Port ?? (context.Request.IsHttps ? 443 : 80);
+                var sameHost = string.Equals(target.Host, reqHost, StringComparison.OrdinalIgnoreCase);
+                var samePort = target.IsDefaultPort ? (reqPort == 80 || reqPort == 443) : (target.Port == reqPort);
+                if (sameHost && samePort)
+                {
+                    context.Response.StatusCode = StatusCodes.Status502BadGateway;
+                    await context.Response.WriteAsync("Self-proxy loop prevented", context.RequestAborted);
+                    return;
+                }
+            }
+
+            // Usa client "relaxado" apenas para destinos internos (localhost/RFC1918)
+            var client = IsPrivateOrLoopbackHost(target.Host) ? ClientRelaxed.Value : ClientStrict.Value;
+
+            // Timeout (segundos) — se não existir, usa 30
+            var timeoutSec = cfg?.GetValue<int?>("ProxySettings:RequestTimeout") ?? 30;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+            if (timeoutSec > 0) cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+
+            // Conteúdo: não copiar p/ memória; stream direto do request
+            StreamContent? streamContent = null;
+            if (string.Equals(context.Request.Method, "GET", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(context.Request.Method, "HEAD", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(context.Request.Method, "DELETE", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(context.Request.Method, "TRACE", StringComparison.OrdinalIgnoreCase))
+            {
+                // métodos que usualmente não têm body
+                streamContent = null;
             }
             else
             {
-                buffer = Array.Empty<byte>();
+                var body = context.Request.Body;
+                if (body.CanSeek) body.Position = 0; // por segurança
+                streamContent = new StreamContent(body);
             }
 
             using var requestMessage = new HttpRequestMessage
             {
                 Method = new HttpMethod(context.Request.Method),
-                RequestUri = new Uri(targetUrl),
-                Content = new ByteArrayContent(buffer)
+                RequestUri = target,
+                Content = streamContent
             };
 
-            // Copia os headers da requisição original
+            // Copia headers (exceto hop-by-hop / problemáticos)
             foreach (var header in context.Request.Headers)
             {
+                if (RestrictedRequestHeaders.Contains(header.Key)) continue;
+
                 if (!requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray()))
                 {
                     requestMessage.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
                 }
             }
 
-            // Faz a requisição
-            using var response = await httpClient.SendAsync(requestMessage);
+            HttpResponseMessage response;
+            try
+            {
+                response = await client.SendAsync(
+                    requestMessage,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cts.Token
+                );
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+                // Cliente cancelou a requisição (não é erro do proxy)
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                // Nosso timeout
+                context.Response.StatusCode = StatusCodes.Status504GatewayTimeout;
+                await context.Response.WriteAsync("Upstream timeout", context.RequestAborted);
+                return;
+            }
+            catch (Exception ex)
+            {
+                context.Response.StatusCode = StatusCodes.Status502BadGateway;
+                await context.Response.WriteAsync("Proxy error", context.RequestAborted);
+                Logger.LogError("Proxy forward error → " + ex);
+                return;
+            }
 
+            // Status + cabeçalhos
             context.Response.StatusCode = (int)response.StatusCode;
 
-            // Copia headers válidos da resposta
             foreach (var header in response.Headers)
             {
                 if (!RestrictedResponseHeaders.Contains(header.Key))
                     context.Response.Headers[header.Key] = header.Value.ToArray();
             }
-
             foreach (var header in response.Content.Headers)
             {
                 if (!RestrictedResponseHeaders.Contains(header.Key))
                     context.Response.Headers[header.Key] = header.Value.ToArray();
             }
 
-            // Copia o body da resposta
-            var responseBody = await response.Content.ReadAsByteArrayAsync();
-            await context.Response.Body.WriteAsync(responseBody);
-            await context.Response.Body.FlushAsync(); 
+            // Evita duplicar tamanho/transfer-encoding
+            context.Response.Headers.Remove("Content-Length");
+            context.Response.Headers.Remove("Transfer-Encoding");
+
+            // Corpo (streaming)
+            await using var respStream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
+            await respStream.CopyToAsync(context.Response.Body, 81_920, context.RequestAborted);
+            await context.Response.Body.FlushAsync(context.RequestAborted);
         }
 
-        // ... outros métodos como RedirectWithBodyAsync ...
         /// <summary>
-        /// Determina o host de redirecionamento com base no modo configurado:
         /// 1 = localhost, 2 = SenderIp, 3 = ContainerName (fallback para SenderIp)
         /// </summary>
         public static string GetRedirectHost(IConfiguration config, NodeStatistics instance)
         {
             var mode = config.GetValue<int>("ProxySettings:RedirectionMode");
-
             return mode switch
             {
-                1 => "localhost", // Sempre força localhost (uso externo)
-                2 => instance.SenderIp ?? "localhost", // Usa IP real enviado por quem respondeu (caso de múltiplos servidores)
-                3 => !string.IsNullOrWhiteSpace(instance.ContainerName)
-                        ? instance.ContainerName
-                        : instance.SenderIp ?? "localhost", // Usa DNS do container (modo docker)
+                1 => "localhost",
+                2 => instance.SenderIp ?? "localhost",
+                3 => !string.IsNullOrWhiteSpace(instance.ContainerName) ? instance.ContainerName : instance.SenderIp ?? "localhost",
                 _ => instance.SenderIp ?? "localhost"
             };
         }
-
-
     }
 }

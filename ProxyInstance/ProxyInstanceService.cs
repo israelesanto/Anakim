@@ -11,6 +11,7 @@ namespace AnakimOrchestrator.ProxyInstance
 {
     public class ProxyInstanceService : BackgroundService
     {
+        private readonly IConfiguration _configuration;
         private readonly string? _tmHost;
         private readonly int _tmPort;
         private readonly int _piPort;
@@ -20,10 +21,12 @@ namespace AnakimOrchestrator.ProxyInstance
         private TcpListener _listener;
         private readonly ProxySettings _proxySettings;
         private readonly INodeStatisticsService _nodeStatisticsService;
-        private readonly InstanceRankingManager _rankingManager = new();
+        private readonly InstanceRankingManager _rankingManager;
 
         public ProxyInstanceService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService, InstanceRankingManager rankingManager)
         {
+            _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+
             _proxySettings = configuration.GetSection("ProxySettings").Get<ProxySettings>()
                 ?? throw new InvalidOperationException("ProxySettings is not configured properly in appsettings.json.");
 
@@ -44,7 +47,7 @@ namespace AnakimOrchestrator.ProxyInstance
             }
 
             _nodeStatisticsService = nodeStatisticsService ?? throw new ArgumentNullException(nameof(nodeStatisticsService));
-            _rankingManager = rankingManager;
+            _rankingManager = rankingManager ?? throw new ArgumentNullException(nameof(rankingManager));
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -110,11 +113,28 @@ namespace AnakimOrchestrator.ProxyInstance
                 }
 
                 var stream = client.GetStream();
-                var buffer = new byte[2048];
+                var buffer = new byte[8192];
 
+                // ---- Primeiro pacote: tenta HELLO do AH
+                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length));
+                if (bytesRead == 0)
+                {
+                    Logger.LogWarning($"Client {remoteInfo} disconnected (no initial data).");
+                    return;
+                }
+
+                var firstMessage = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                if (!TryProcessHelloFromAh(firstMessage, client))
+                {
+                    // Não era HELLO: tenta processar como estatística
+                    var stats0 = ProcessStatistics(firstMessage);
+                    if (stats0 != null) lastReceivedStats = stats0;
+                }
+
+                // ---- Loop normal
                 while (true)
                 {
-                    var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length));
+                    bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length));
                     if (bytesRead == 0)
                     {
                         Logger.LogWarning($"Client {remoteInfo} disconnected.");
@@ -122,6 +142,11 @@ namespace AnakimOrchestrator.ProxyInstance
                     }
 
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                    // Aceita HELLOs idempotentes
+                    if (TryProcessHelloFromAh(message, client))
+                        continue;
+
                     var stats = ProcessStatistics(message);
                     if (stats != null)
                         lastReceivedStats = stats;
@@ -148,6 +173,56 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
+        // HELLO recebido do AH: registra endpoint público e marca como vivo
+        private bool TryProcessHelloFromAh(string jsonMessage, TcpClient client)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(jsonMessage);
+                var root = doc.RootElement;
+
+                // Campos aceitos no HELLO do AH
+                string? id = root.TryGetProperty("InstanceId", out var pId) ? pId.GetString() : null;
+                string? name = root.TryGetProperty("InstanceName", out var pName) ? pName.GetString() : null;
+                string? host = root.TryGetProperty("PublicHost", out var pHost) ? pHost.GetString() : null;
+
+                int port = 0;
+                if (root.TryGetProperty("PublicPort", out var pPort) && pPort.ValueKind == JsonValueKind.Number)
+                    port = pPort.GetInt32();
+                else if (root.TryGetProperty("GeneralPort", out var gPort) && gPort.ValueKind == JsonValueKind.Number)
+                    port = gPort.GetInt32();
+
+                bool useHttps = root.TryGetProperty("UseHttps", out var pHttps) && pHttps.ValueKind == JsonValueKind.True;
+
+                if (string.IsNullOrWhiteSpace(id))
+                    return false; // não é HELLO
+
+                // host fallback = IP remoto
+                var remoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address?.ToString() ?? "127.0.0.1";
+                var chosenHost = string.IsNullOrWhiteSpace(host) ? remoteIp : host!.Trim();
+
+                // porta é obrigatória; se não vier, não é HELLO válido
+                if (port <= 0)
+                {
+                    Logger.LogWarning($"[HANDSHAKE PI] HELLO do {id} sem porta pública (PublicPort/GeneralPort). Ignorado.");
+                    return true; // era HELLO mas inválido → evita cair no parser de métricas
+                }
+
+                var scheme = useHttps ? "https" : "http";
+                var baseUrl = $"{scheme}://{chosenHost}:{port}";
+
+                _rankingManager.RegisterPublicEndpoint(id!, baseUrl);
+                _rankingManager.TouchAlive(id!);
+
+                Logger.LogInfo($"[HANDSHAKE PI] Registrado endpoint público do {id} ({name ?? "AH"}) → {baseUrl}");
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private async Task ExecuteConnectionAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -161,6 +236,9 @@ namespace AnakimOrchestrator.ProxyInstance
                     _stream = _client.GetStream();
                     Logger.LogSuccess("Connected to Traffic Manager!");
 
+                    // (Opcional) Se quiser também mandar HELLO do PI ao TM, faça aqui.
+                    await SendHelloToTrafficManagerAsync(_stream, _configuration, _proxySettings);
+
                     await SendStatisticsPeriodically(stoppingToken);
                 }
                 catch (Exception ex)
@@ -170,6 +248,52 @@ namespace AnakimOrchestrator.ProxyInstance
                     await Task.Delay(_proxySettings.TimeUpdate, stoppingToken);
                 }
             }
+        }
+
+        // PI -> TM: HELLO com porta/host públicos do PI
+        private async Task SendHelloToTrafficManagerAsync(NetworkStream stream, IConfiguration cfg, ProxySettings proxy)
+        {
+            try
+            {
+                var useHttps = cfg.GetValue<bool>("UseHttps");
+                var publicPort = cfg.GetValue<int>("GeneralPort"); // porta pública do PI (onde o Kestrel do PI está ouvindo)
+                var publicHost = GetFirstNonLoopbackIPv4() ?? "localhost";
+
+                var hello = new
+                {
+                    InstanceId = proxy.InstanceId,     // "PI01"
+                    InstanceName = proxy.InstanceName,   // "Proxy Instance 01"
+                    PublicHost = publicHost,
+                    PublicPort = publicPort,
+                    UseHttps = useHttps
+                };
+
+                var json = JsonSerializer.Serialize(hello);
+                var data = Encoding.UTF8.GetBytes(json);
+                await stream.WriteAsync(data, 0, data.Length);
+                Logger.LogInfo($"[HELLO→TM] {hello.InstanceId} {publicHost}:{publicPort} https={(useHttps ? "on" : "off")}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"[HELLO→TM] falhou: {ex.Message}");
+            }
+        }
+
+        private static string? GetFirstNonLoopbackIPv4()
+        {
+            foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily == AddressFamily.InterNetwork &&
+                        !IPAddress.IsLoopback(ua.Address))
+                    {
+                        return ua.Address.ToString();
+                    }
+                }
+            }
+            return null;
         }
 
         private async Task SendStatisticsPeriodically(CancellationToken stoppingToken)
@@ -223,24 +347,10 @@ namespace AnakimOrchestrator.ProxyInstance
                 _rankingManager.Update(stats);
 
                 var best = _rankingManager.GetBestInstance();
+                if (best?.ProcessStat == null)
+                    return stats;
 
-                if (best == null)
-                {
-                    Logger.LogInfo("The 'best' object is null");
-                    return null;
-                }
-
-                if (best.ProcessStat == null)
-                {
-                    Logger.LogInfo("The 'best.ProcessStat' object is null");
-                    return null;
-                }
-
-                if (best != null)
-                {
-                    Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
-                }
-
+                Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
                 return stats;
             }
             catch (Exception ex)

@@ -14,13 +14,13 @@ namespace AnakimOrchestrator.TrafficManager
         private readonly IConfiguration _configuration;
         private TcpListener? _listener;
         private readonly int _port;
-        private readonly InstanceRankingManager _rankingManager = new();
+        private readonly InstanceRankingManager _rankingManager;
 
         // Constructor validates configuration and sets up port and ranking manager
         public TrafficManagerService(IConfiguration configuration, InstanceRankingManager rankingManager)
         {
-            _configuration = configuration;
-            _rankingManager = rankingManager;
+            _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+            _rankingManager = rankingManager ?? throw new ArgumentNullException(nameof(rankingManager));
 
             var settings = _configuration.GetSection("ProxySettings");
             if (settings.GetValue<int>("Mode") != 1)
@@ -46,6 +46,7 @@ namespace AnakimOrchestrator.TrafficManager
                     var client = await _listener.AcceptTcpClientAsync(cancellationToken);
                     _ = HandleClientAsync(client, cancellationToken); // Handle client in background
                 }
+                catch (OperationCanceledException) { /* shutdown */ }
                 catch (Exception ex)
                 {
                     Logger.LogError($"Error accepting client connection: {ex.Message}");
@@ -66,60 +67,81 @@ namespace AnakimOrchestrator.TrafficManager
         {
             NodeStatistics? lastStats = null;
 
+            var remote = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
+            Logger.LogInfo($"Connection established with {remote}");
+
             try
             {
-                var remote = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
-                Logger.LogInfo($"Connection established with {remote}");
-
                 if (client is null)
                 {
                     Logger.LogError("TcpClient é nulo. Encerrando execução.");
                     return;
                 }
 
-                var stream = client.GetStream();
-                var buffer = new byte[2048];
+                using var stream = client.GetStream();
+                var buffer = new byte[8192];
+                var acc = new StringBuilder();
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                    int bytesRead;
+                    try
+                    {
+                        bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+
                     if (bytesRead == 0)
                     {
                         Logger.LogWarning($"Client {remote} disconnected.");
                         break;
                     }
 
-                    var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    var stats = JsonSerializer.Deserialize<NodeStatistics>(message);
+                    acc.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
 
-                    if (stats?.ProcessStat == null)
+                    // Podem ter chegado 0..N JSONs completos no acumulador
+                    foreach (var json in ExtractCompleteJsonObjects(acc))
                     {
-                        Logger.LogInfo("Statistics or its ProcessStat is null.");
-                        return;
-                    }
+                        var payload = json.Trim();
+                        if (string.IsNullOrWhiteSpace(payload))
+                            continue;
 
-                    // If valid statistics were received
-                    if (stats != null && !string.IsNullOrEmpty(stats.ProcessStat.InstanceId))
-                    {
-                        lastStats = stats;
-                        _rankingManager.Update(stats);
+                        // 1) Tenta HELLO do PI (idempotente). Se for HELLO, já tratou e segue.
+                        if (TryProcessHelloFromPi(payload, client))
+                            continue;
 
-                        Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
-
-                        var best = _rankingManager.GetBestInstance();
-                        if (best?.ProcessStat != null)
+                        // 2) Tenta estatísticas
+                        try
                         {
-                            Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
+                            var stats = JsonSerializer.Deserialize<NodeStatistics>(payload);
+                            if (stats?.ProcessStat != null)
+                            {
+                                lastStats = stats;
+                                _rankingManager.Update(stats);
+
+                                Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
+
+                                var best = _rankingManager.GetBestInstance();
+                                if (best?.ProcessStat != null)
+                                {
+                                    Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
+                                }
+                            }
+                            else
+                            {
+                                // Não derruba a conexão; pode ser outra mensagem futura (ex.: ping/ack/hello reemitido)
+                                Logger.LogInfo("Statistics or its ProcessStat is null (ignorado).");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogWarning($"[TM] Falha ao parsear mensagem como NodeStatistics: {ex.Message}");
+                            // segue o loop; não fecha o socket
                         }
                     }
-                    else
-                    {
-                        Logger.LogWarning("Invalid or incomplete statistics received.");
-                    }
-
-                    // Responds to the Proxy Instance with an ACK
-                    var response = Encoding.UTF8.GetBytes("ACK");
-                    await stream.WriteAsync(response, cancellationToken);
                 }
             }
             catch (Exception ex)
@@ -128,7 +150,6 @@ namespace AnakimOrchestrator.TrafficManager
             }
             finally
             {
-                var remote = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
                 client?.Close();
                 Logger.LogInfo($"Connection closed for {remote}");
 
@@ -142,6 +163,128 @@ namespace AnakimOrchestrator.TrafficManager
                         Logger.LogWarning($"⚠️ Failed to remove: {lastStats.ProcessStat.InstanceId} not found in ranking.");
                 }
             }
+        }
+
+        /// <summary>
+        /// Processa HELLO do PI. Se a mensagem contém campos de HELLO, registra endpoint público
+        /// e retorna true (já tratou). Se não for HELLO, retorna false para o chamador tentar como estatística.
+        /// </summary>
+        private bool TryProcessHelloFromPi(string jsonMessage, TcpClient client)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(jsonMessage);
+                var root = doc.RootElement;
+
+                // Se não houver InstanceId, não é HELLO
+                if (!root.TryGetProperty("InstanceId", out var pId))
+                    return false;
+
+                var id = pId.GetString();
+                if (string.IsNullOrWhiteSpace(id))
+                    return false;
+
+                string? host = root.TryGetProperty("PublicHost", out var pHost) ? pHost.GetString() : null;
+
+                int port = 0;
+                if (root.TryGetProperty("PublicPort", out var pPort) && pPort.ValueKind == JsonValueKind.Number)
+                    port = pPort.GetInt32();
+                else if (root.TryGetProperty("GeneralPort", out var gPort) && gPort.ValueKind == JsonValueKind.Number)
+                    port = gPort.GetInt32();
+
+                bool useHttps = root.TryGetProperty("UseHttps", out var pHttps) &&
+                                (pHttps.ValueKind == JsonValueKind.True ||
+                                 (pHttps.ValueKind == JsonValueKind.String && bool.TryParse(pHttps.GetString(), out var b) && b));
+
+                // HELLO inválido? Não trate como estatística; só ignore.
+                if (port <= 0)
+                {
+                    Logger.LogWarning($"[HANDSHAKE TM] HELLO from {id} without public port. Ignoring HELLO.");
+                    return true; // era HELLO, mas inválido — evita cair no parser de métricas
+                }
+
+                // Se o host não vier, usa o IP remoto da conexão
+                var remoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address?.ToString() ?? "127.0.0.1";
+                var chosenHost = string.IsNullOrWhiteSpace(host) ? remoteIp : host!.Trim();
+                var scheme = useHttps ? "https" : "http";
+                var baseUrl = $"{scheme}://{chosenHost}:{port}";
+
+                _rankingManager.RegisterPublicEndpoint(id!, baseUrl);
+                _rankingManager.TouchAlive(id!);
+
+                Logger.LogInfo($"[HANDSHAKE TM] Registered public endpoint of {id} → {baseUrl}");
+                return true;
+            }
+            catch
+            {
+                return false; // não é JSON válido → deixa o chamador tentar como NodeStatistics
+            }
+        }
+
+        /// <summary>
+        /// Extrai 0..N objetos JSON completos do acumulador (balanceamento de chaves), mesmo sem delimitador.
+        /// Usa uma heurística simples que respeita strings e escapes.
+        /// </summary>
+        private static IEnumerable<string> ExtractCompleteJsonObjects(StringBuilder acc)
+        {
+            var list = new List<string>();
+            int depth = 0;
+            bool inString = false;
+            bool escape = false;
+            int startIdx = -1;
+
+            for (int i = 0; i < acc.Length; i++)
+            {
+                var c = acc[i];
+
+                if (inString)
+                {
+                    if (escape)
+                    {
+                        escape = false;
+                    }
+                    else if (c == '\\')
+                    {
+                        escape = true;
+                    }
+                    else if (c == '"')
+                    {
+                        inString = false;
+                    }
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = true;
+                    if (depth == 0 && startIdx == -1)
+                        startIdx = (startIdx == -1) ? i : startIdx;
+                }
+                else if (c == '{')
+                {
+                    if (depth == 0)
+                        startIdx = i;
+                    depth++;
+                }
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0 && startIdx >= 0)
+                    {
+                        var len = (i - startIdx) + 1;
+                        var json = acc.ToString(startIdx, len);
+                        list.Add(json);
+
+                        // Remove do acumulador tudo até i (inclusive)
+                        acc.Remove(0, i + 1);
+                        // Reinicia varredura no novo buffer
+                        i = -1;
+                        startIdx = -1;
+                    }
+                }
+            }
+
+            return list;
         }
 
         // Exposes the current best-ranked Proxy Instance
