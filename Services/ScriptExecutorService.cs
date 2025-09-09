@@ -42,8 +42,12 @@ namespace AnakimOrchestrator.Services
             _httpContextAccessor = httpContextAccessor; // <-- novo
         }
 
-        public async Task<object?> RunScriptAsync(string scriptName, IDictionary<string, object> args, int? languageOverride = null)
+        // 🔧 aceitamos args = null e normalizamos internamente
+        public async Task<object?> RunScriptAsync(string scriptName, IDictionary<string, object>? args, int? languageOverride = null) // <-- ❗ args agora é nullable
         {
+            // Se vier null (corpo vazio), viramos um dicionário vazio
+            args ??= new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase); // <-- normalize
+
             // Injeta variáveis padrão
             InjectBuiltInVariables(args);
 
@@ -128,8 +132,13 @@ namespace AnakimOrchestrator.Services
             try
             {
                 _logger.LogInformation("Executando método Run do script '{ScriptName}'", scriptName);
-                var resultTask = (Task<object>)runMethod.Invoke(scriptObject, new object[] { globals });
-                return await resultTask;
+
+                var returnVal = runMethod.Invoke(scriptObject, new object[] { globals });
+
+                // Robusto: aceita Task<object>, Task, ou retorno direto
+                if (returnVal is Task<object> tobj) return await tobj;
+                if (returnVal is Task t) { await t; return null; }
+                return returnVal;
             }
             catch (TargetInvocationException ex)
             {
@@ -218,8 +227,6 @@ namespace AnakimOrchestrator.Services
 
             return headers;
         }
-
-
 
         // --- helpers de JWT (decodifica payload e lê 'sub') ---
         private static long? TryGetSubAsLong(string jwt)
