@@ -12,9 +12,10 @@
     <Content Include="ico-vermelho.ico" />
   </ItemGroup>
 
+  <!-- Pacotes -->
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.14.0" /> <!-- ✅ correto -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.14.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.4" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="9.0.6" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.4" />
@@ -26,23 +27,36 @@
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.0.4" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.14.0" />
     <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
+
+    <!-- ✅ Engine JavaScript -->
+    <PackageReference Include="Jint" Version="3.*" />
   </ItemGroup>
 
+  <!-- Referências de projetos locais -->
   <ItemGroup>
     <ProjectReference Include="..\..\DataAccessProviderGit\AnakimAccessProvider.csproj" />
     <ProjectReference Include="..\..\MetadataManagementSystemGit\AnakimMetadataManagment.csproj" />
   </ItemGroup>
 
+  <!-- Arquivos que precisam ir para a saída -->
   <ItemGroup>
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+
+    <!-- Copiar todos os scripts (CSharp, JavaScript, Templates) para bin -->
+    <Content Include="Scripts\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
+  <!-- Pastas de scripts -->
   <ItemGroup>
     <Folder Include="Scripts\Templates\" />
+    <Folder Include="Scripts\JavaScript\" />
   </ItemGroup>
 
+  <!-- Pós-build (mantido) -->
   <Target Name="PostBuild" AfterTargets="Build">
     <Exec Command="powershell -ExecutionPolicy Bypass -File C:\Anakins\ReplicarArquivos.ps1" />
   </Target>
