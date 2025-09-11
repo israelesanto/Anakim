@@ -59,27 +59,32 @@ namespace AnakimOrchestrator.Services
                 return ((ScriptLanguage)languageOverride.Value) switch
                 {
                     ScriptLanguage.JavaScript => await RunJavaScriptAsync(scriptName, args, headers),
+                    ScriptLanguage.Python => await RunPythonScriptAsync(scriptName, args, headers),
                     ScriptLanguage.CSharp => await RunCSharpScriptAsync(scriptName, args, headers),
                     _ => throw new NotSupportedException($"Linguagem override '{languageOverride}' não suportada.")
                 };
             }
 
-            // Resolução com cache (prioridade JS -> C#)
+            // Resolução com cache (prioridade JS → PY → C#)
             if (!TryResolveWithCache(scriptName, out var ext))
             {
-                _logger.LogError("Script '{ScriptName}' não encontrado em JavaScript nem em CSharp.", scriptName);
+                _logger.LogError("Script '{ScriptName}' não encontrado em JavaScript, Python nem em CSharp.", scriptName);
                 throw new FileNotFoundException($"Script '{scriptName}' não encontrado.");
             }
 
-            return ext == ".js"
-                ? await RunJavaScriptAsync(scriptName, args, headers)
-                : await RunCSharpScriptAsync(scriptName, args, headers);
+            return ext switch
+            {
+                ".js" => await RunJavaScriptAsync(scriptName, args, headers),
+                ".py" => await RunPythonScriptAsync(scriptName, args, headers),
+                _ => await RunCSharpScriptAsync(scriptName, args, headers),
+            };
         }
+
 
         // ========================= Resolução com cache =========================
         private bool TryResolveWithCache(string name, out string ext)
         {
-            // 1) Tenta cache (só aceita se o arquivo ainda existe)
+            // 1) Tenta cache e valida existência/LastWriteTime
             if (_routeCache.TryGetValue(name, out var hit))
             {
                 var path = ResolvePathByExt(name, hit.ext);
@@ -92,17 +97,23 @@ namespace AnakimOrchestrator.Services
                         return true;
                     }
                 }
-
-                // arquivo mudou/sumiu -> invalida cache para revalidar
-                _routeCache.TryRemove(name, out _);
+                _routeCache.TryRemove(name, out _); // invalida cache
             }
 
-            // 2) Revalidação: prioridade JS → C#
+            // 2) Revalidação no disco — prioridade: JS → PY → CSX
             var js = Path.Combine(BaseScriptPath, "JavaScript", $"{name}.js");
             if (File.Exists(js))
             {
                 ext = ".js";
                 _routeCache[name] = (ext, File.GetLastWriteTimeUtc(js));
+                return true;
+            }
+
+            var py = Path.Combine(BaseScriptPath, "Python", $"{name}.py");
+            if (File.Exists(py))
+            {
+                ext = ".py";
+                _routeCache[name] = (ext, File.GetLastWriteTimeUtc(py));
                 return true;
             }
 
@@ -118,16 +129,13 @@ namespace AnakimOrchestrator.Services
             return false;
         }
 
-
-        private static string ResolvePathByExt(string name, string ext)
+        private static string ResolvePathByExt(string name, string ext) => ext switch
         {
-            return ext switch
-            {
-                ".js" => Path.Combine(BaseScriptPath, "JavaScript", $"{name}.js"),
-                ".csx" => Path.Combine(BaseScriptPath, "CSharp", $"{name}.csx"),
-                _ => Path.Combine(BaseScriptPath, $"{name}{ext}")
-            };
-        }
+            ".js" => Path.Combine(BaseScriptPath, "JavaScript", $"{name}.js"),
+            ".py" => Path.Combine(BaseScriptPath, "Python", $"{name}.py"),
+            ".csx" => Path.Combine(BaseScriptPath, "CSharp", $"{name}.csx"),
+            _ => Path.Combine(BaseScriptPath, $"{name}{ext}")
+        };
 
         // ========================= Execução C# (.csx) =========================
         private async Task<object?> RunCSharpScriptAsync(string scriptName, IDictionary<string, object> args, IDictionary<string, object> headers)
@@ -378,6 +386,142 @@ namespace AnakimOrchestrator.Services
             }
 
             return headers;
+        }
+
+        private async Task<object?> RunPythonScriptAsync(string scriptName, IDictionary<string, object> args, IDictionary<string, object> headers)
+        {
+            var scriptPath = Path.Combine(BaseScriptPath, "Python", $"{scriptName}.py");
+            if (!File.Exists(scriptPath))
+            {
+                // fallback defensivo: tenta C#
+                var csxPath = Path.Combine(BaseScriptPath, "CSharp", $"{scriptName}.csx");
+                if (File.Exists(csxPath))
+                {
+                    _logger.LogWarning("PY '{ScriptName}' não encontrado; fallback para C#.", scriptName);
+                    _routeCache[scriptName] = (".csx", File.GetLastWriteTimeUtc(csxPath));
+                    return await RunCSharpScriptAsync(scriptName, args, headers);
+                }
+                _logger.LogError("Script '{ScriptName}' não encontrado no caminho {ScriptPath}", scriptName, scriptPath);
+                throw new FileNotFoundException($"Script '{scriptName}' não encontrado em Python.");
+            }
+
+            var bootstrapPath = ResolveBootstrapPath();
+            if (bootstrapPath is null)
+            {
+                _logger.LogError("Bootstrap Python não encontrado. Procurei em: {P1} | {P2} | {P3}",
+                    Path.Combine(AppContext.BaseDirectory, "_bootstrap.py"),
+                    Path.Combine(AppContext.BaseDirectory, "Infrastructure", "PythonRunner", "_bootstrap.py"),
+                    Path.Combine(AppContext.BaseDirectory, "Scripts", "Python", "_bootstrap.py"));
+                throw new FileNotFoundException("Bootstrap Python '_bootstrap.py' ausente no runtime (ver .csproj).");
+            }
+
+
+            _logger.LogInformation("Iniciando execução do script PY '{ScriptName}'", scriptName);
+
+            // Monta 'g' enxuto (somente tipos serializáveis)
+            var g = BuildGlobals(scriptName, args, headers);
+            var gThin = new
+            {
+                Args = g.Args,
+                Headers = g.Headers,
+                CurrentUserId = g.CurrentUserId,
+                NowUtc = g.NowUtc
+            };
+            var jsonIn = JsonSerializer.Serialize(gThin);
+
+            var pythonExe = GetPythonExecutablePath(); // "python" | "python3" | caminho absoluto
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = pythonExe,
+                ArgumentList = { bootstrapPath, scriptPath },
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8
+            };
+
+            using var proc = new System.Diagnostics.Process { StartInfo = psi };
+            if (!proc.Start())
+                throw new Exception("Falha ao iniciar processo Python.");
+
+            await proc.StandardInput.WriteAsync(jsonIn);
+            proc.StandardInput.Close();
+
+            var timeout = TimeSpan.FromSeconds(5);
+            var exited = await Task.Run(() => proc.WaitForExit((int)timeout.TotalMilliseconds));
+            if (!exited)
+            {
+                try { proc.Kill(true); } catch { }
+                throw new TimeoutException("Script Python excedeu o tempo limite.");
+            }
+
+            var stdout = await proc.StandardOutput.ReadToEndAsync();
+            var stderr = await proc.StandardError.ReadToEndAsync();
+
+            if (!string.IsNullOrWhiteSpace(stderr))
+                _logger.LogWarning("STDERR (python/{Script}): {Err}", scriptName, stderr.Trim());
+
+            if (string.IsNullOrWhiteSpace(stdout))
+                return new { ok = true };
+
+            try
+            {
+                using var doc = JsonDocument.Parse(stdout);
+                return JsonSerializer.Deserialize<object>(doc.RootElement.GetRawText());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Falha ao parsear JSON de saída do Python para {Script}. Saída: {Stdout}", scriptName, stdout);
+                return new { ok = false, error = "invalid_python_output", raw = stdout };
+            }
+        }
+
+        private static string? ResolveBootstrapPath()
+        {
+            // 1) preferido: raiz do bin (quando usamos <Link>_bootstrap.py</Link>)
+            var p1 = Path.Combine(AppContext.BaseDirectory, "_bootstrap.py");
+            if (File.Exists(p1)) return p1;
+
+            // 2) fallback: subpasta copiada inteira (alguns pipelines mantêm a estrutura)
+            var p2 = Path.Combine(AppContext.BaseDirectory, "Infrastructure", "PythonRunner", "_bootstrap.py");
+            if (File.Exists(p2)) return p2;
+
+            // 3) fallback legado: junto dos scripts (não recomendado, mas evita pane)
+            var p3 = Path.Combine(AppContext.BaseDirectory, "Scripts", "Python", "_bootstrap.py");
+            if (File.Exists(p3)) return p3;
+
+            return null;
+        }
+
+
+        private static string GetPythonExecutablePath()
+        {
+            // tenta "python" e "python3" de forma simples
+            var candidates = new[] { "python", "python3" };
+            foreach (var c in candidates)
+            {
+                try
+                {
+                    using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = c,
+                        ArgumentList = { "--version" },
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    });
+                    if (p != null) { p.WaitForExit(1500); return c; }
+                }
+                catch { /* ignore */ }
+            }
+            // Se quiser, coloque um caminho fixo como fallback:
+            // return @"C:\Python311\python.exe";
+            return "python";
         }
 
         private static long? TryGetSubAsLong(string jwt)

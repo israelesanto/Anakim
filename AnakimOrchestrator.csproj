@@ -44,10 +44,18 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
 
+	<Content Include="Infrastructure\PythonRunner\_bootstrap.py">
+	   <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
+	
     <!-- Copiar todos os scripts (CSharp, JavaScript, Templates) para bin -->
     <Content Include="Scripts\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+  <ItemGroup>
+    <None Remove="Infrastructure\PythonRunner\_bootstrap.py" />
+    <None Remove="Scripts\Python\sum.py" />
   </ItemGroup>
 
   <!-- Pastas de scripts -->
