@@ -82,7 +82,7 @@ namespace AnakimOrchestrator.Infrastructure
                 .FirstOrDefault();
         }
 
-        // Todos os nós "frescos"
+        // Todos os nós "frescos" (mantido)
         public IReadOnlyCollection<NodeStatistics> GetAll()
         {
             var now = DateTime.UtcNow;
@@ -94,6 +94,18 @@ namespace AnakimOrchestrator.Infrastructure
                 .Cast<NodeStatistics>()
                 .ToList()
                 .AsReadOnly();
+        }
+
+        // 🔹 NOVO: snapshot "fresh" de todos os nós (forma simples para provedores/aggregators)
+        public IReadOnlyList<NodeStatistics> GetAllInstances()
+        {
+            var now = DateTime.UtcNow;
+
+            return _instances.Values
+                .Where(x => now - x.LastUpdateUtc <= _expirationTime)
+                .Select(x => x.Statistics)
+                .OfType<NodeStatistics>()
+                .ToList();
         }
 
         // Para FailoverManager: ordenação atual

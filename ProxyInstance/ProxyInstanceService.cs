@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using AnakimOrchestrator.Infrastructure;
+using System.Collections.Concurrent;
 
 namespace AnakimOrchestrator.ProxyInstance
 {
@@ -14,16 +15,36 @@ namespace AnakimOrchestrator.ProxyInstance
         private readonly IConfiguration _configuration;
         private readonly string? _tmHost;
         private readonly int _tmPort;
+
+        // Porta já usada para receber conexões dos AHs (estatísticas/handshake)
         private readonly int _piPort;
+
+        // NOVO: porta de streaming para observabilidade (NDJSON)
+        private readonly int _streamPort;
+
         private readonly bool _hasTrafficManager;
         private TcpClient? _client;
         private NetworkStream? _stream;
-        private TcpListener _listener;
+
+        private TcpListener _listener;         // AH -> PI (já existia)
+        private TcpListener _obsListener;      // NOVO: Observabilidade -> PI (stream NDJSON)
+
         private readonly ProxySettings _proxySettings;
         private readonly INodeStatisticsService _nodeStatisticsService;
         private readonly InstanceRankingManager _rankingManager;
 
-        public ProxyInstanceService(IConfiguration configuration, INodeStatisticsService nodeStatisticsService, InstanceRankingManager rankingManager)
+        // NOVO: agregador (PI + seus AHs) para montar o payload do stream
+        private readonly IProxyStatisticsAggregator _aggregator;
+
+        // NOVO: conexões de observadores inscritos no stream
+        private readonly ConcurrentDictionary<Guid, StreamWriter> _observers = new();
+
+        public ProxyInstanceService(
+            IConfiguration configuration,
+            INodeStatisticsService nodeStatisticsService,
+            InstanceRankingManager rankingManager,
+            IProxyStatisticsAggregator aggregator // injete no DI
+        )
         {
             _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
 
@@ -36,6 +57,7 @@ namespace AnakimOrchestrator.ProxyInstance
             if (_piPort <= 0)
                 throw new InvalidOperationException("Invalid Proxy Instance port configuration.");
 
+            // Porta do TM (se houver)
             if (_hasTrafficManager)
             {
                 var tmSettings = configuration.GetSection("ProxySettings:TrafficManager");
@@ -48,20 +70,34 @@ namespace AnakimOrchestrator.ProxyInstance
 
             _nodeStatisticsService = nodeStatisticsService ?? throw new ArgumentNullException(nameof(nodeStatisticsService));
             _rankingManager = rankingManager ?? throw new ArgumentNullException(nameof(rankingManager));
+            _aggregator = aggregator ?? throw new ArgumentNullException(nameof(aggregator));
+
+            // NOVO: lê ProxySettings:PortStream (porta de stream). Fallback = _piPort + 1
+            var cfgStreamPort = configuration.GetSection("ProxySettings").GetValue<int>("PortStream");
+            _streamPort = cfgStreamPort > 0 ? cfgStreamPort : (_piPort + 1);
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             Logger.LogInfo("ProxyInstanceService started.");
-            StartListener(stoppingToken);
 
+            // 1) Listener para AHs (como já era)
+            StartListenerForAH(stoppingToken);
+
+            // 2) NOVO: Listener de streaming de observabilidade (clientes externos)
+            StartObserverStream(stoppingToken);
+
+            // 3) Se houver TM, mantém o loop de conexão e envio de estatísticas
             if (_hasTrafficManager)
                 await ExecuteConnectionAsync(stoppingToken);
             else
                 Logger.LogInfo("HasTrafficManager is false, skipping connection to Traffic Manager.");
         }
 
-        private void StartListener(CancellationToken stoppingToken)
+        // =========================
+        // 1) LISTENER PARA AHS (JÁ EXISTIA)
+        // =========================
+        private void StartListenerForAH(CancellationToken stoppingToken)
         {
             try
             {
@@ -223,6 +259,164 @@ namespace AnakimOrchestrator.ProxyInstance
             }
         }
 
+        // =========================
+        // 2) NOVO: STREAM DE OBSERVABILIDADE (CLIENTE → CONECTA E RECEBE NDJSON)
+        // =========================
+        private void StartObserverStream(CancellationToken stoppingToken)
+        {
+            try
+            {
+                _obsListener = new TcpListener(IPAddress.Any, _streamPort);
+                _obsListener.Start();
+                Logger.LogSuccess($"[STREAM] Observability listening on port {_streamPort} (NDJSON).");
+
+                // Accept loop
+                Task.Run(() => AcceptObserversAsync(stoppingToken), stoppingToken);
+
+                // Publisher loop
+                Task.Run(() => PublishSnapshotsLoopAsync(stoppingToken), stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[STREAM] Failed to start observability listener on port {_streamPort}: {ex.Message}");
+            }
+        }
+
+        private async Task AcceptObserversAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    var client = await _obsListener.AcceptTcpClientAsync(stoppingToken);
+                    _ = HandleObserverAsync(client, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    Logger.LogInfo("[STREAM] Accept observers canceled.");
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError($"[STREAM] Error accepting observer: {ex.Message}");
+                }
+            }
+        }
+
+        private async Task HandleObserverAsync(TcpClient client, CancellationToken ct)
+        {
+            StreamWriter w = null!;
+            try
+            {
+                var stream = client.GetStream();
+                w = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+
+                var id = Guid.NewGuid();
+                _observers[id] = w;
+
+                // hello_ack imediato
+                await w.WriteLineAsync(JsonSerializer.Serialize(new
+                {
+                    type = "hello_ack",
+                    server = "Anakim",
+                    role = "PI",
+                    ts = DateTime.UtcNow
+                }));
+
+                Logger.LogInfo($"[STREAM] Observer connected: {client.Client.RemoteEndPoint}");
+
+                // Heartbeats dedicados, caso fique ocioso
+                _ = Task.Run(async () =>
+                {
+                    while (!ct.IsCancellationRequested && client.Connected)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                        try
+                        {
+                            await w.WriteLineAsync(JsonSerializer.Serialize(new { type = "heartbeat", ts = DateTime.UtcNow }));
+                        }
+                        catch
+                        {
+                            break;
+                        }
+                    }
+                }, ct);
+
+                // Mantém a conexão aberta até o cliente encerrar
+                var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+                while (!ct.IsCancellationRequested && client.Connected)
+                {
+                    var line = await reader.ReadLineAsync();
+                    if (line is null) break; // cliente fechou
+                    // opcional: tratar "ping" ou comandos simples
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[STREAM] Error handling observer: {ex.Message}");
+            }
+            finally
+            {
+                try
+                {
+                    // remove do pool
+                    foreach (var kv in _observers)
+                    {
+                        if (kv.Value == w)
+                        {
+                            _observers.TryRemove(kv.Key, out _);
+                            break;
+                        }
+                    }
+                }
+                catch { /* ignore */ }
+
+                try { client?.Close(); } catch { }
+                Logger.LogInfo("[STREAM] Observer disconnected.");
+            }
+        }
+
+        private async Task PublishSnapshotsLoopAsync(CancellationToken ct)
+        {
+            var lastFull = DateTime.MinValue;
+
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var now = DateTime.UtcNow;
+                    var full = (now - lastFull) >= TimeSpan.FromSeconds(5);
+
+                    // monta snapshot (PI + AHs)
+                    var payload = _aggregator.BuildSnapshot(full);
+                    var json = JsonSerializer.Serialize(payload);
+
+                    foreach (var kv in _observers.ToArray())
+                    {
+                        try
+                        {
+                            await kv.Value.WriteLineAsync(json);
+                        }
+                        catch
+                        {
+                            _observers.TryRemove(kv.Key, out _);
+                        }
+                    }
+
+                    if (full) lastFull = now;
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning($"[STREAM] publish error: {ex.Message}");
+                }
+
+                try { await Task.Delay(TimeSpan.FromSeconds(1), ct); } catch { }
+            }
+        }
+
+        // =========================
+        // 3) CONEXÃO COM TRAFFIC MANAGER (JÁ EXISTIA)
+        // =========================
         private async Task ExecuteConnectionAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -236,7 +430,7 @@ namespace AnakimOrchestrator.ProxyInstance
                     _stream = _client.GetStream();
                     Logger.LogSuccess("Connected to Traffic Manager!");
 
-                    // (Opcional) Se quiser também mandar HELLO do PI ao TM, faça aqui.
+                    // (Opcional) HELLO do PI ao TM
                     await SendHelloToTrafficManagerAsync(_stream, _configuration, _proxySettings);
 
                     await SendStatisticsPeriodically(stoppingToken);
@@ -256,13 +450,13 @@ namespace AnakimOrchestrator.ProxyInstance
             try
             {
                 var useHttps = cfg.GetValue<bool>("UseHttps");
-                var publicPort = cfg.GetValue<int>("GeneralPort"); // porta pública do PI (onde o Kestrel do PI está ouvindo)
+                var publicPort = cfg.GetValue<int>("GeneralPort"); // porta pública do PI (Kestrel)
                 var publicHost = GetFirstNonLoopbackIPv4() ?? "localhost";
 
                 var hello = new
                 {
                     InstanceId = proxy.InstanceId,     // "PI01"
-                    InstanceName = proxy.InstanceName,   // "Proxy Instance 01"
+                    InstanceName = proxy.InstanceName, // "Proxy Instance 01"
                     PublicHost = publicHost,
                     PublicPort = publicPort,
                     UseHttps = useHttps
@@ -377,7 +571,8 @@ namespace AnakimOrchestrator.ProxyInstance
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             Logger.LogInfo("ProxyInstanceService is stopping...");
-            _listener?.Stop();
+            try { _listener?.Stop(); } catch { }
+            try { _obsListener?.Stop(); } catch { }
             CleanupConnection();
             await base.StopAsync(cancellationToken);
         }
@@ -406,6 +601,7 @@ namespace AnakimOrchestrator.ProxyInstance
                 statistics.System.TotalMemoryMB = 0;
         }
 
+        // Uso manual caso precise reconectar ao TM via endpoint administrativo
         public async Task ConnectToTrafficManager(CancellationToken stoppingToken)
         {
             if (_hasTrafficManager)

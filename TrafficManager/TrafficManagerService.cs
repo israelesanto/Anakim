@@ -2,79 +2,134 @@
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using AnakimOrchestrator.Infrastructure;
 
 namespace AnakimOrchestrator.TrafficManager
 {
-    // Service that runs in Traffic Manager mode (Mode = 1) and listens for statistics from Proxy Instances
-    public class TrafficManagerService : IHostedService
+    /// <summary>
+    /// Traffic Manager (Mode=1)
+    /// - Ouve conexões dos PIs em ProxySettings:Port (recebe HELLO + NodeStatistics)
+    /// - Expõe um stream NDJSON em ProxySettings:PortStream (ou Port+1) para observabilidade
+    ///   que envia snapshots contínuos usando ITrafficManagerStatisticsAggregator
+    /// </summary>
+    public sealed class TrafficManagerService : BackgroundService
     {
         private readonly IConfiguration _configuration;
-        private TcpListener? _listener;
-        private readonly int _port;
+        private readonly ILogger<TrafficManagerService> _logger;
         private readonly InstanceRankingManager _rankingManager;
+        private readonly ITrafficManagerStatisticsAggregator _aggregator;
 
-        // Constructor validates configuration and sets up port and ranking manager
-        public TrafficManagerService(IConfiguration configuration, InstanceRankingManager rankingManager)
+        // Porta para receber conexões dos PIs (já existente)
+        private readonly int _tmListenPort;
+
+        // Porta de streaming NDJSON para observabilidade (novo)
+        private readonly int _streamPort;
+
+        private TcpListener? _piListener;     // PIs -> TM
+        private TcpListener? _obsListener;    // Observability clients -> TM (stream NDJSON)
+
+        // Conexões dos observadores
+        private readonly ConcurrentDictionary<Guid, StreamWriter> _observers = new();
+
+        public TrafficManagerService(
+            IConfiguration configuration,
+            ILogger<TrafficManagerService> logger,
+            InstanceRankingManager rankingManager,
+            ITrafficManagerStatisticsAggregator aggregator
+        )
         {
             _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _rankingManager = rankingManager ?? throw new ArgumentNullException(nameof(rankingManager));
+            _aggregator = aggregator ?? throw new ArgumentNullException(nameof(aggregator));
 
             var settings = _configuration.GetSection("ProxySettings");
             if (settings.GetValue<int>("Mode") != 1)
                 throw new InvalidOperationException("TrafficManagerService should only run in Traffic Manager mode (Mode: 1).");
 
-            _port = settings.GetValue<int>("Port");
-            if (_port <= 0)
-                throw new ArgumentException($"Port must be greater than 0. Current value: {_port}", nameof(_port));
+            _tmListenPort = settings.GetValue<int>("Port");
+            if (_tmListenPort <= 0)
+                throw new ArgumentException($"ProxySettings:Port must be greater than 0. Current value: {_tmListenPort}", nameof(_tmListenPort));
+
+            var cfgStreamPort = settings.GetValue<int>("PortStream");
+            _streamPort = cfgStreamPort > 0 ? cfgStreamPort : (_tmListenPort + 1);
         }
 
-        // Starts listening on the configured port for incoming connections from Proxy Instances
-        public async Task StartAsync(CancellationToken cancellationToken)
+        protected override Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _listener = new TcpListener(IPAddress.Any, _port);
-            _listener.Start();
-            Logger.LogSuccess($"Traffic Manager listening on port {_port}");
+            // 1) Listener para PIs
+            StartPiListener(stoppingToken);
 
-            while (!cancellationToken.IsCancellationRequested)
+            // 2) Listener + publisher do stream NDJSON de observabilidade
+            StartObserverStream(stoppingToken);
+
+            // Mantém o serviço vivo até cancelarem
+            return Task.Run(async () =>
             {
                 try
                 {
-                    Logger.LogInfo("Waiting for connections...");
-                    var client = await _listener.AcceptTcpClientAsync(cancellationToken);
-                    _ = HandleClientAsync(client, cancellationToken); // Handle client in background
+                    await Task.Delay(Timeout.Infinite, stoppingToken);
                 }
-                catch (OperationCanceledException) { /* shutdown */ }
-                catch (Exception ex)
+                catch (OperationCanceledException) { /* normal on shutdown */ }
+            }, stoppingToken);
+        }
+
+        public override Task StopAsync(CancellationToken cancellationToken)
+        {
+            try { _piListener?.Stop(); } catch { }
+            try { _obsListener?.Stop(); } catch { }
+            _logger.LogInformation("Traffic Manager Service stopped.");
+            return base.StopAsync(cancellationToken);
+        }
+
+        // ========== PIs -> TM (HELLO + NodeStatistics) ==========
+        private void StartPiListener(CancellationToken ct)
+        {
+            try
+            {
+                _piListener = new TcpListener(IPAddress.Any, _tmListenPort);
+                _piListener.Start();
+                _logger.LogInformation("Traffic Manager listening on port {Port}", _tmListenPort);
+
+                _ = Task.Run(async () =>
                 {
-                    Logger.LogError($"Error accepting client connection: {ex.Message}");
-                }
+                    while (!ct.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            _logger.LogInformation("Waiting for PI connections...");
+                            var client = await _piListener.AcceptTcpClientAsync(ct);
+                            _ = HandlePiClientAsync(client, ct);
+                        }
+                        catch (OperationCanceledException) { /* shutting down */ }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error accepting PI connection");
+                        }
+                    }
+                }, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to start PI listener on port {Port}", _tmListenPort);
             }
         }
 
-        // Gracefully stops the listener
-        public Task StopAsync(CancellationToken cancellationToken)
-        {
-            _listener?.Stop();
-            Logger.LogInfo("Traffic Manager Service stopped.");
-            return Task.CompletedTask;
-        }
-
-        // Handles an individual Proxy Instance connection, receiving and processing statistics
-        private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+        private async Task HandlePiClientAsync(TcpClient client, CancellationToken cancellationToken)
         {
             NodeStatistics? lastStats = null;
-
             var remote = client?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
-            Logger.LogInfo($"Connection established with {remote}");
+            _logger.LogInformation("Connection established with {Remote}", remote);
 
             try
             {
                 if (client is null)
                 {
-                    Logger.LogError("TcpClient é nulo. Encerrando execução.");
+                    _logger.LogError("TcpClient is null. Aborting.");
                     return;
                 }
 
@@ -96,24 +151,23 @@ namespace AnakimOrchestrator.TrafficManager
 
                     if (bytesRead == 0)
                     {
-                        Logger.LogWarning($"Client {remote} disconnected.");
+                        _logger.LogWarning("PI {Remote} disconnected.", remote);
                         break;
                     }
 
                     acc.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
 
-                    // Podem ter chegado 0..N JSONs completos no acumulador
                     foreach (var json in ExtractCompleteJsonObjects(acc))
                     {
                         var payload = json.Trim();
                         if (string.IsNullOrWhiteSpace(payload))
                             continue;
 
-                        // 1) Tenta HELLO do PI (idempotente). Se for HELLO, já tratou e segue.
+                        // 1) HELLO do PI (idempotente)
                         if (TryProcessHelloFromPi(payload, client))
                             continue;
 
-                        // 2) Tenta estatísticas
+                        // 2) Estatísticas (NodeStatistics)
                         try
                         {
                             var stats = JsonSerializer.Deserialize<NodeStatistics>(payload);
@@ -122,45 +176,46 @@ namespace AnakimOrchestrator.TrafficManager
                                 lastStats = stats;
                                 _rankingManager.Update(stats);
 
-                                Logger.LogInfo($"Statistics updated for {stats.ProcessStat.InstanceName} [{stats.ProcessStat.InstanceId}]");
+                                _logger.LogInformation("Statistics updated for {Name} [{Id}]",
+                                    stats.ProcessStat.InstanceName, stats.ProcessStat.InstanceId);
 
                                 var best = _rankingManager.GetBestInstance();
                                 if (best?.ProcessStat != null)
                                 {
-                                    Logger.LogInfo($"🟢 Top ranked: {best.ProcessStat.InstanceName} | CPU: {best.ProcessStat.CpuUsage} | Memory: {best.ProcessStat.PrivateMemoryMB}MB");
+                                    _logger.LogInformation("🟢 Top ranked: {Name} | CPU: {CPU} | Memory: {Mem}MB",
+                                        best.ProcessStat.InstanceName, best.ProcessStat.CpuUsage, best.ProcessStat.PrivateMemoryMB);
                                 }
                             }
                             else
                             {
-                                // Não derruba a conexão; pode ser outra mensagem futura (ex.: ping/ack/hello reemitido)
-                                Logger.LogInfo("Statistics or its ProcessStat is null (ignorado).");
+                                _logger.LogDebug("NodeStatistics or ProcessStat is null (ignored).");
                             }
                         }
                         catch (Exception ex)
                         {
-                            Logger.LogWarning($"[TM] Falha ao parsear mensagem como NodeStatistics: {ex.Message}");
-                            // segue o loop; não fecha o socket
+                            _logger.LogWarning(ex, "[TM] Failed to parse message as NodeStatistics");
+                            // continua no loop; não derruba o socket
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                Logger.LogError($"Error handling client: {ex.Message}");
+                _logger.LogError(ex, "Error handling PI client");
             }
             finally
             {
-                client?.Close();
-                Logger.LogInfo($"Connection closed for {remote}");
+                try { client?.Close(); } catch { }
+                _logger.LogInformation("Connection closed for {Remote}", remote);
 
-                // Removes the instance from ranking upon disconnection
+                // remove do ranking ao desconectar
                 if (lastStats?.ProcessStat?.InstanceId != null)
                 {
                     var removed = _rankingManager.Remove(lastStats.ProcessStat.InstanceId);
                     if (removed)
-                        Logger.LogInfo($"✅ Instance {lastStats.ProcessStat.InstanceName} removed from ranking.");
+                        _logger.LogInformation("✅ Instance {Name} removed from ranking.", lastStats.ProcessStat.InstanceName);
                     else
-                        Logger.LogWarning($"⚠️ Failed to remove: {lastStats.ProcessStat.InstanceId} not found in ranking.");
+                        _logger.LogWarning("⚠️ Failed to remove: {Id} not found in ranking.", lastStats.ProcessStat.InstanceId);
                 }
             }
         }
@@ -176,7 +231,6 @@ namespace AnakimOrchestrator.TrafficManager
                 using var doc = JsonDocument.Parse(jsonMessage);
                 var root = doc.RootElement;
 
-                // Se não houver InstanceId, não é HELLO
                 if (!root.TryGetProperty("InstanceId", out var pId))
                     return false;
 
@@ -192,18 +246,17 @@ namespace AnakimOrchestrator.TrafficManager
                 else if (root.TryGetProperty("GeneralPort", out var gPort) && gPort.ValueKind == JsonValueKind.Number)
                     port = gPort.GetInt32();
 
-                bool useHttps = root.TryGetProperty("UseHttps", out var pHttps) &&
-                                (pHttps.ValueKind == JsonValueKind.True ||
-                                 (pHttps.ValueKind == JsonValueKind.String && bool.TryParse(pHttps.GetString(), out var b) && b));
+                bool useHttps =
+                    root.TryGetProperty("UseHttps", out var pHttps) &&
+                    (pHttps.ValueKind == JsonValueKind.True ||
+                     (pHttps.ValueKind == JsonValueKind.String && bool.TryParse(pHttps.GetString(), out var b) && b));
 
-                // HELLO inválido? Não trate como estatística; só ignore.
                 if (port <= 0)
                 {
-                    Logger.LogWarning($"[HANDSHAKE TM] HELLO from {id} without public port. Ignoring HELLO.");
-                    return true; // era HELLO, mas inválido — evita cair no parser de métricas
+                    _logger.LogWarning("[HANDSHAKE TM] HELLO from {Id} without public port. Ignoring HELLO.", id);
+                    return true; // era HELLO, mas inválido → não tente parsear como estatística
                 }
 
-                // Se o host não vier, usa o IP remoto da conexão
                 var remoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address?.ToString() ?? "127.0.0.1";
                 var chosenHost = string.IsNullOrWhiteSpace(host) ? remoteIp : host!.Trim();
                 var scheme = useHttps ? "https" : "http";
@@ -212,18 +265,18 @@ namespace AnakimOrchestrator.TrafficManager
                 _rankingManager.RegisterPublicEndpoint(id!, baseUrl);
                 _rankingManager.TouchAlive(id!);
 
-                Logger.LogInfo($"[HANDSHAKE TM] Registered public endpoint of {id} → {baseUrl}");
+                _logger.LogInformation("[HANDSHAKE TM] Registered public endpoint of {Id} → {Url}", id, baseUrl);
                 return true;
             }
             catch
             {
-                return false; // não é JSON válido → deixa o chamador tentar como NodeStatistics
+                return false; // não é JSON válido
             }
         }
 
         /// <summary>
         /// Extrai 0..N objetos JSON completos do acumulador (balanceamento de chaves), mesmo sem delimitador.
-        /// Usa uma heurística simples que respeita strings e escapes.
+        /// Respeita strings e escapes.
         /// </summary>
         private static IEnumerable<string> ExtractCompleteJsonObjects(StringBuilder acc)
         {
@@ -239,18 +292,9 @@ namespace AnakimOrchestrator.TrafficManager
 
                 if (inString)
                 {
-                    if (escape)
-                    {
-                        escape = false;
-                    }
-                    else if (c == '\\')
-                    {
-                        escape = true;
-                    }
-                    else if (c == '"')
-                    {
-                        inString = false;
-                    }
+                    if (escape) { escape = false; }
+                    else if (c == '\\') { escape = true; }
+                    else if (c == '"') { inString = false; }
                     continue;
                 }
 
@@ -262,8 +306,7 @@ namespace AnakimOrchestrator.TrafficManager
                 }
                 else if (c == '{')
                 {
-                    if (depth == 0)
-                        startIdx = i;
+                    if (depth == 0) startIdx = i;
                     depth++;
                 }
                 else if (c == '}')
@@ -275,9 +318,7 @@ namespace AnakimOrchestrator.TrafficManager
                         var json = acc.ToString(startIdx, len);
                         list.Add(json);
 
-                        // Remove do acumulador tudo até i (inclusive)
                         acc.Remove(0, i + 1);
-                        // Reinicia varredura no novo buffer
                         i = -1;
                         startIdx = -1;
                     }
@@ -287,10 +328,156 @@ namespace AnakimOrchestrator.TrafficManager
             return list;
         }
 
-        // Exposes the current best-ranked Proxy Instance
-        public NodeStatistics? GetBestProxyInstance()
+        // ========== Stream de Observabilidade (NDJSON) ==========
+        private void StartObserverStream(CancellationToken ct)
         {
-            return _rankingManager.GetBestInstance();
+            try
+            {
+                _obsListener = new TcpListener(IPAddress.Any, _streamPort);
+                _obsListener.Start();
+                _logger.LogInformation("[STREAM] Observability listening on port {Port} (NDJSON).", _streamPort);
+
+                // Accept loop
+                _ = Task.Run(() => AcceptObserversAsync(ct), ct);
+
+                // Publisher loop
+                _ = Task.Run(() => PublishSnapshotsLoopAsync(ct), ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[STREAM] Failed to start observability listener on port {Port}", _streamPort);
+            }
         }
+
+        private async Task AcceptObserversAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var client = await _obsListener!.AcceptTcpClientAsync(ct);
+                    _ = HandleObserverAsync(client, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogInformation("[STREAM] Accept observers canceled.");
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[STREAM] Error accepting observer connection");
+                }
+            }
+        }
+
+        private async Task HandleObserverAsync(TcpClient client, CancellationToken ct)
+        {
+            StreamWriter? w = null;
+            try
+            {
+                var stream = client.GetStream();
+                w = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+
+                var id = Guid.NewGuid();
+                _observers[id] = w;
+
+                // hello_ack
+                await w.WriteLineAsync(JsonSerializer.Serialize(new
+                {
+                    type = "hello_ack",
+                    server = "Anakim",
+                    role = "TM",
+                    ts = DateTime.UtcNow
+                }));
+
+                _logger.LogInformation("[STREAM] Observer connected: {Remote}", client.Client.RemoteEndPoint);
+
+                // heartbeats
+                _ = Task.Run(async () =>
+                {
+                    while (!ct.IsCancellationRequested && client.Connected)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                        try
+                        {
+                            await w.WriteLineAsync(JsonSerializer.Serialize(new { type = "heartbeat", ts = DateTime.UtcNow }));
+                        }
+                        catch { break; }
+                    }
+                }, ct);
+
+                // mantém aberto até o cliente fechar
+                var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+                while (!ct.IsCancellationRequested && client.Connected)
+                {
+                    var line = await reader.ReadLineAsync();
+                    if (line is null) break;
+                    // opcional: tratar "ping" etc.
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[STREAM] Error handling observer");
+            }
+            finally
+            {
+                try
+                {
+                    foreach (var kv in _observers)
+                    {
+                        if (kv.Value == w)
+                        {
+                            _observers.TryRemove(kv.Key, out _);
+                            break;
+                        }
+                    }
+                }
+                catch { /* ignore */ }
+
+                try { client?.Close(); } catch { }
+                _logger.LogInformation("[STREAM] Observer disconnected.");
+            }
+        }
+
+        private async Task PublishSnapshotsLoopAsync(CancellationToken ct)
+        {
+            var lastFull = DateTime.MinValue;
+
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var now = DateTime.UtcNow;
+                    var full = (now - lastFull) >= TimeSpan.FromSeconds(5);
+
+                    // TM + PIs (+ agregados de AHs por PI), pronto para NDJSON
+                    var payload = _aggregator.BuildSnapshot(full);
+                    var json = JsonSerializer.Serialize(payload);
+
+                    foreach (var kv in _observers.ToArray())
+                    {
+                        try
+                        {
+                            await kv.Value.WriteLineAsync(json);
+                        }
+                        catch
+                        {
+                            _observers.TryRemove(kv.Key, out _);
+                        }
+                    }
+
+                    if (full) lastFull = now;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[STREAM] publish error");
+                }
+
+                try { await Task.Delay(TimeSpan.FromSeconds(1), ct); } catch { }
+            }
+        }
+
+        // Exposes the current best-ranked Proxy Instance
+        public NodeStatistics? GetBestProxyInstance() => _rankingManager.GetBestInstance();
     }
 }

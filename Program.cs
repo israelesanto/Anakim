@@ -302,7 +302,11 @@ class Program
                 services.AddSingleton<INodeStatisticsService, NodeStatisticsService>();
                 services.AddSingleton<InstanceRankingManager>();
                 services.AddSingleton<FailoverManager>();
-
+                services.AddSingleton<IProxyStatisticsAggregator, ProxyStatisticsAggregator>();
+                services.AddSingleton<ITrafficManagerStatisticsAggregator, TrafficManagerStatisticsAggregator>();
+                services.AddSingleton<IAhMetricsProvider, MyAhMetricsProvider>(); // usado no PI
+                //services.AddSingleton<IPiMetricsProvider, MyPiMetricsProvider>(); // usado no TM
+                services.AddSingleton<IPiMetricsProvider, RankingPiMetricsProvider>(); // usado no TM
                 services.AddSingleton<IAnakimAccessProvider>(sp =>
                 {
                     var config = sp.GetRequiredService<IConfiguration>();

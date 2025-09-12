@@ -2,6 +2,7 @@
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Configuration;
+using AnakimOrchestrator.Helpers;
 
 namespace AnakimOrchestrator.Infrastructure
 {
@@ -10,6 +11,7 @@ namespace AnakimOrchestrator.Infrastructure
         private readonly IConfiguration _configuration;
         private readonly ProxySettings _proxySettings;
         private readonly DockerSettings _dockerSettings;
+        private readonly SystemCpuMeter _sysCpu = new();
 
         public NodeStatisticsService(IConfiguration configuration)
         {
@@ -21,9 +23,50 @@ namespace AnakimOrchestrator.Infrastructure
                 ?? new DockerSettings(); // fallback em caso de ausência
         }
 
+        //public NodeStatistics CollectStatistics()
+        //{
+        //    var process = Process.GetCurrentProcess();
+
+        //    return new NodeStatistics
+        //    {
+        //        Timestamp = DateTime.UtcNow,
+        //        SenderIp = GetContainerAwareIp(),
+        //        ContainerName = Environment.GetEnvironmentVariable("HOSTNAME") ?? Dns.GetHostName(),
+
+        //        SenderPort = new NodeStatistics.PortsInfo
+        //        {
+        //            GeneralPort = _proxySettings.Port,
+        //        },
+
+        //        Port = new NodeStatistics.PortsInfo
+        //        {
+        //            GeneralPort = _configuration.GetValue<int>("GeneralPort"),
+        //        },
+
+        //        ProcessStat = new NodeStatistics.ProcessStatistics
+        //        {
+        //            Name = "Proxy Instance",
+        //            CpuUsage = Math.Round(GetCpuUsage(), 2),
+        //            MemoryUsageMB = Math.Round(process.WorkingSet64 / (1024.0 * 1024.0), 2),
+        //            PrivateMemoryMB = Math.Round(process.PrivateMemorySize64 / (1024.0 * 1024.0), 2),
+        //            ActiveThreads = process.Threads.Count,
+        //            InstanceId = _proxySettings?.InstanceId ?? "unknow",
+        //            InstanceName = _proxySettings?.InstanceName ?? "unknow"
+        //        },
+
+        //        System = new NodeStatistics.SystemStatistics
+        //        {
+        //            CpuUsage = Math.Round(GetSystemCpuUsage(), 2),
+        //            MemoryAvailableMB = Math.Max(0, Math.Round(GetAvailableMemory(), 2)),
+        //            TotalMemoryMB = Math.Max(0, Math.Round(GetTotalMemory(), 2))
+        //        }
+        //    };
+        //}
+
         public NodeStatistics CollectStatistics()
         {
             var process = Process.GetCurrentProcess();
+            var (totalMb, freeMb) = SystemMemoryInfo.Snapshot();
 
             return new NodeStatistics
             {
@@ -31,32 +74,25 @@ namespace AnakimOrchestrator.Infrastructure
                 SenderIp = GetContainerAwareIp(),
                 ContainerName = Environment.GetEnvironmentVariable("HOSTNAME") ?? Dns.GetHostName(),
 
-                SenderPort = new NodeStatistics.PortsInfo
-                {
-                    GeneralPort = _proxySettings.Port,
-                },
-
-                Port = new NodeStatistics.PortsInfo
-                {
-                    GeneralPort = _configuration.GetValue<int>("GeneralPort"),
-                },
+                SenderPort = new NodeStatistics.PortsInfo { GeneralPort = _proxySettings.Port },
+                Port = new NodeStatistics.PortsInfo { GeneralPort = _configuration.GetValue<int>("GeneralPort") },
 
                 ProcessStat = new NodeStatistics.ProcessStatistics
                 {
-                    Name = "Proxy Instance",
-                    CpuUsage = Math.Round(GetCpuUsage(), 2),
+                    Name = _proxySettings.Mode == 2 ? "Proxy Instance" : "Traffic Manager",
+                    CpuUsage = Math.Round(GetCpuUsage(), 2), // processo
                     MemoryUsageMB = Math.Round(process.WorkingSet64 / (1024.0 * 1024.0), 2),
                     PrivateMemoryMB = Math.Round(process.PrivateMemorySize64 / (1024.0 * 1024.0), 2),
                     ActiveThreads = process.Threads.Count,
-                    InstanceId = _proxySettings?.InstanceId ?? "unknow",
-                    InstanceName = _proxySettings?.InstanceName ?? "unknow"
+                    InstanceId = _proxySettings?.InstanceId ?? "unknown",
+                    InstanceName = _proxySettings?.InstanceName ?? "unknown"
                 },
 
                 System = new NodeStatistics.SystemStatistics
                 {
-                    CpuUsage = Math.Round(GetSystemCpuUsage(), 2),
-                    MemoryAvailableMB = Math.Max(0, Math.Round(GetAvailableMemory(), 2)),
-                    TotalMemoryMB = Math.Max(0, Math.Round(GetTotalMemory(), 2))
+                    CpuUsage = _sysCpu.NextPercent(),        // **agora é do host**
+                    MemoryAvailableMB = Math.Max(0, Math.Round(freeMb, 2)),
+                    TotalMemoryMB = Math.Max(0, Math.Round(totalMb, 2))
                 }
             };
         }

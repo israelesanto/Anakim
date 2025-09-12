@@ -54,13 +54,18 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
+    <Compile Remove="Scripts\Templates\**" />
+    <Content Remove="Scripts\Templates\**" />
+    <EmbeddedResource Remove="Scripts\Templates\**" />
+    <None Remove="Scripts\Templates\**" />
+  </ItemGroup>
+  <ItemGroup>
     <None Remove="Infrastructure\PythonRunner\_bootstrap.py" />
     <None Remove="Scripts\Python\sum.py" />
   </ItemGroup>
 
   <!-- Pastas de scripts -->
   <ItemGroup>
-    <Folder Include="Scripts\Templates\" />
     <Folder Include="Scripts\JavaScript\" />
   </ItemGroup>
 
