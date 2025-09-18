@@ -1,5 +1,6 @@
 ﻿using System.Net;
 using System.Net.Sockets;
+using System.IO;            
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
@@ -57,6 +58,23 @@ namespace AnakimOrchestrator.TrafficManager
 
             var cfgStreamPort = settings.GetValue<int>("PortStream");
             _streamPort = cfgStreamPort > 0 ? cfgStreamPort : (_tmListenPort + 1);
+        }
+
+        private static bool IsNormalDisconnect(Exception ex)
+        {
+            // cancelamentos e disposes
+            if (ex is OperationCanceledException || ex is TaskCanceledException || ex is ObjectDisposedException)
+                return true;
+
+            // 10054/ConnectionReset e similares
+            if (ex is IOException io && io.InnerException is SocketException se)
+            {
+                return se.SocketErrorCode is SocketError.ConnectionReset   // 10054
+                    or SocketError.ConnectionAborted
+                    or SocketError.Shutdown
+                    or SocketError.TimedOut;
+            }
+            return false;
         }
 
         protected override Task ExecuteAsync(CancellationToken stoppingToken)
@@ -146,12 +164,14 @@ namespace AnakimOrchestrator.TrafficManager
                     }
                     catch (OperationCanceledException)
                     {
+                        // shutdown/cancel normal
                         break;
                     }
 
                     if (bytesRead == 0)
                     {
-                        _logger.LogWarning("PI {Remote} disconnected.", remote);
+                        // EOF: peer fechou “limpo”
+                        _logger.LogInformation("Connection closed by {Remote}", remote);
                         break;
                     }
 
@@ -199,9 +219,14 @@ namespace AnakimOrchestrator.TrafficManager
                     }
                 }
             }
+            // ⬇️ trata 10054/abort/timeout/etc. como desconexão esperada (não loga como erro)
+            catch (Exception ex) when (IsNormalDisconnect(ex))
+            {
+                _logger.LogInformation("Connection closed for {Remote} (normal disconnect).", remote);
+            }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling PI client");
+                _logger.LogError(ex, "Error handling PI client {Remote}", remote);
             }
             finally
             {
@@ -217,8 +242,12 @@ namespace AnakimOrchestrator.TrafficManager
                     else
                         _logger.LogWarning("⚠️ Failed to remove: {Id} not found in ranking.", lastStats.ProcessStat.InstanceId);
                 }
+                // OBS: se quiser remover mesmo quando só houve HELLO (sem métricas),
+                // adapte TryProcessHelloFromPi para retornar o InstanceId (out param) e
+                // guarde em uma variável para usar aqui.
             }
         }
+
 
         /// <summary>
         /// Processa HELLO do PI. Se a mensagem contém campos de HELLO, registra endpoint público
