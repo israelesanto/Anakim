@@ -15,6 +15,11 @@ using AnakimSuite.AnakimAccessProvider;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using AnakimSuite.AnakimMetadataManagment;
+using System.Net.WebSockets;   // <- p/ WebSocket
+using System.Net.Sockets;     // <- p/ TcpClient
+using System.Text;            // <- p/ StringBuilder, Encoding
+using System.IO;              // <- p/ File/Path
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 using TMResolver = AnakimOrchestrator.TrafficManager.TrafficManagerHelpers;
 using PIResolver = AnakimOrchestrator.ProxyInstance.ProxyInstanceHelpers;
@@ -49,44 +54,39 @@ class Program
                     var useHttps = configuration.GetValue<bool>("UseHttps");
                     var port = configuration.GetValue<int>("GeneralPort");
 
+                    // Carrega o certificado uma vez
+                    X509Certificate2? certificate = null;
                     if (useHttps)
                     {
                         try
                         {
-                            // Carregar certificado conforme SO
                             var pfxSection = configuration.GetSection("Certificate:Pfx");
                             var pemSection = configuration.GetSection("Certificate:Pem");
-
-                            X509Certificate2 certificate;
 
                             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                             {
                                 var pfxPath = pfxSection.GetValue<string>("Path");
                                 var password = pfxSection.GetValue<string>("Password");
-
                                 if (string.IsNullOrWhiteSpace(pfxPath) || !File.Exists(pfxPath))
                                     throw new FileNotFoundException($"Arquivo PFX não encontrado: {pfxPath}");
-
                                 Logger.LogInfo("[CERT] Windows - carregando .pfx");
-                                certificate = new X509Certificate2(pfxPath, password);
+                                certificate = new X509Certificate2(pfxPath!, password);
                             }
                             else
                             {
                                 var certPath = pemSection.GetValue<string>("CertPath");
                                 var keyPath = pemSection.GetValue<string>("KeyPath");
-
                                 if (string.IsNullOrWhiteSpace(certPath) || !File.Exists(certPath))
                                     throw new FileNotFoundException($"Arquivo PEM (cert) não encontrado: {certPath}");
                                 if (string.IsNullOrWhiteSpace(keyPath) || !File.Exists(keyPath))
                                     throw new FileNotFoundException($"Arquivo PEM (key) não encontrado: {keyPath}");
 
                                 Logger.LogInfo("[CERT] Linux - carregando .pem + .key");
-                                var pemCert = X509Certificate2.CreateFromPemFile(certPath, keyPath);
-
+                                var pemCert = X509Certificate2.CreateFromPemFile(certPath!, keyPath!);
                                 if (!pemCert.HasPrivateKey)
                                 {
                                     using var rsa = RSA.Create();
-                                    rsa.ImportFromPem(File.ReadAllText(keyPath));
+                                    rsa.ImportFromPem(File.ReadAllText(keyPath!));
                                     certificate = pemCert.CopyWithPrivateKey(rsa);
                                 }
                                 else
@@ -94,21 +94,44 @@ class Program
                                     certificate = pemCert;
                                 }
                             }
-
-                            options.ListenAnyIP(port, lo => lo.UseHttps(certificate));
                         }
                         catch (Exception ex)
                         {
                             Logger.LogError("[CERT] Falha ao carregar certificado: " + ex.Message);
-                            Logger.LogInfo("[CERT] Fallback para HTTP (dev). Defina Certificate no appsettings para HTTPS.");
-                            options.ListenAnyIP(port); // fallback
+                            Logger.LogInfo("[CERT] Fallback para HTTP no listener principal.");
                         }
                     }
+
+                    // Listener principal (pode ser h1 apenas se também for usar WS nele)
+                    if (useHttps && certificate != null)
+                        options.ListenAnyIP(port, lo =>
+                        {
+                            lo.Protocols = HttpProtocols.Http1;   // <- garante Upgrade p/ WS
+                            lo.UseHttps(certificate);
+                        });
                     else
+                        options.ListenAnyIP(port, lo => lo.Protocols = HttpProtocols.Http1);
+
+                    // WebSocket Bridge em 8083 (ws ou wss)
+                    var wsBridgePort = configuration.GetValue<int?>("WebSocketBridge:Port") ?? 8083;
+                    var wsBridgeUseHttps = configuration.GetValue<bool?>("WebSocketBridge:UseHttps") ?? useHttps;
+
+                    if (wsBridgePort != port)
                     {
-                        options.ListenAnyIP(port);
+                        if (wsBridgeUseHttps && certificate != null)
+                            options.ListenAnyIP(wsBridgePort, lo =>
+                            {
+                                lo.Protocols = HttpProtocols.Http1; // <- ESSENCIAL p/ WebSocket
+                                lo.UseHttps(certificate);
+                            });
+                        else
+                            options.ListenAnyIP(wsBridgePort, lo =>
+                            {
+                                lo.Protocols = HttpProtocols.Http1; // <- ESSENCIAL p/ WebSocket
+                            });
                     }
                 })
+
                 .Configure((app) =>
                 {
                     var config = app.ApplicationServices.GetRequiredService<IConfiguration>();
@@ -130,7 +153,6 @@ class Program
                                     path != "/" &&
                                     !Path.HasExtension(path))
                                 {
-                                    // ✅ pegue o ambiente via DI (IApplicationBuilder não tem .Environment)
                                     var env = app.ApplicationServices.GetRequiredService<IWebHostEnvironment>();
                                     var webRoot = env.WebRootPath ?? Path.Combine(AppContext.BaseDirectory, "wwwroot");
 
@@ -146,8 +168,80 @@ class Program
 
                         app.UseDefaultFiles();
                         app.UseStaticFiles();
-
                     }
+
+                    // Habilita WebSockets no pipeline (sempre antes do Map /stats)
+                    app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
+
+                    app.Map("/stats", branch =>
+                    {
+                        branch.Run(async ctx =>
+                        {
+                            if (!ctx.WebSockets.IsWebSocketRequest)
+                            {
+                                ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await ctx.Response.WriteAsync("WebSocket endpoint");
+                                return;
+                            }
+
+                            var wsHost = config.GetValue<string>("WebSocketBridge:Host") ?? "127.0.0.1";
+                            var portStream = config.GetValue<int?>("ProxySettings:PortStream") ?? 5101;
+
+                            using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+                            using var tcp = new TcpClient { NoDelay = true };
+
+                            try
+                            {
+                                await tcp.ConnectAsync(wsHost, portStream);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.LogError($"[WSBRIDGE] Falha ao conectar TCP {wsHost}:{portStream}: {ex.Message}");
+                                try { await ws.CloseAsync(WebSocketCloseStatus.InternalServerError, "TCP connect failed", ctx.RequestAborted); } catch { }
+                                return;
+                            }
+
+                            using var ns = tcp.GetStream();
+                            var buf = new byte[8192];
+                            var acc = new StringBuilder();
+
+                            // TCP (NDJSON) -> WS (texto)
+                            while (ws.State == WebSocketState.Open && !ctx.RequestAborted.IsCancellationRequested)
+                            {
+                                int read;
+                                try
+                                {
+                                    read = await ns.ReadAsync(buf.AsMemory(0, buf.Length), ctx.RequestAborted);
+                                    if (read <= 0) break;
+                                }
+                                catch (OperationCanceledException) { break; }
+                                catch (Exception ex)
+                                {
+                                    Logger.LogError("[WSBRIDGE] Erro lendo do TCP NDJSON: " + ex.Message);
+                                    break;
+                                }
+
+                                acc.Append(Encoding.UTF8.GetString(buf, 0, read));
+
+                                string s = acc.ToString();
+                                int idx;
+                                while ((idx = s.IndexOf('\n')) >= 0)
+                                {
+                                    var line = s[..idx].TrimEnd('\r');
+                                    if (line.Length > 0)
+                                    {
+                                        var payload = Encoding.UTF8.GetBytes(line);
+                                        await ws.SendAsync(payload, WebSocketMessageType.Text, true, ctx.RequestAborted);
+                                    }
+                                    s = s[(idx + 1)..];
+                                }
+                                acc.Clear();
+                                acc.Append(s);
+                            }
+
+                            try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "TCP ended", ctx.RequestAborted); } catch { }
+                        });
+                    });
 
                     // CORS único (sem middleware manual duplicado)
                     app.UseCors();
