@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using AnakimOrchestrator.Infrastructure.RequestProtection.Models;
 
 namespace AnakimOrchestrator.Infrastructure
 {
@@ -75,8 +76,10 @@ namespace AnakimOrchestrator.Infrastructure
         }
 
         // ---------- Proxy principal ----------
-        public static async Task RedirectWithBodyAsync(HttpContext context, string targetUrl)
+        public static async Task<ProxyForwardResult> RedirectWithBodyAsync(HttpContext context, string targetUrl)
         {
+            var result = new ProxyForwardResult();
+
             var cfg = context.RequestServices.GetService(typeof(IConfiguration)) as IConfiguration;
             var target = new Uri(targetUrl);
 
@@ -87,11 +90,14 @@ namespace AnakimOrchestrator.Infrastructure
                 var reqPort = context.Request.Host.Port ?? (context.Request.IsHttps ? 443 : 80);
                 var sameHost = string.Equals(target.Host, reqHost, StringComparison.OrdinalIgnoreCase);
                 var samePort = target.IsDefaultPort ? (reqPort == 80 || reqPort == 443) : (target.Port == reqPort);
+
                 if (sameHost && samePort)
                 {
+                    result.ErrorMessage = "Self-proxy loop prevented";
+
                     context.Response.StatusCode = StatusCodes.Status502BadGateway;
                     await context.Response.WriteAsync("Self-proxy loop prevented", context.RequestAborted);
-                    return;
+                    return result;
                 }
             }
 
@@ -101,7 +107,10 @@ namespace AnakimOrchestrator.Infrastructure
             // Timeout (segundos) — se não existir, usa 30
             var timeoutSec = cfg?.GetValue<int?>("ProxySettings:RequestTimeout") ?? 30;
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
-            if (timeoutSec > 0) cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+            if (timeoutSec > 0)
+            {
+                cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+            }
 
             // Conteúdo: não copiar p/ memória; stream direto do request
             StreamContent? streamContent = null;
@@ -110,13 +119,16 @@ namespace AnakimOrchestrator.Infrastructure
                 string.Equals(context.Request.Method, "DELETE", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(context.Request.Method, "TRACE", StringComparison.OrdinalIgnoreCase))
             {
-                // métodos que usualmente não têm body
                 streamContent = null;
             }
             else
             {
                 var body = context.Request.Body;
-                if (body.CanSeek) body.Position = 0; // por segurança
+                if (body.CanSeek)
+                {
+                    body.Position = 0;
+                }
+
                 streamContent = new StreamContent(body);
             }
 
@@ -130,7 +142,10 @@ namespace AnakimOrchestrator.Infrastructure
             // Copia headers (exceto hop-by-hop / problemáticos)
             foreach (var header in context.Request.Headers)
             {
-                if (RestrictedRequestHeaders.Contains(header.Key)) continue;
+                if (RestrictedRequestHeaders.Contains(header.Key))
+                {
+                    continue;
+                }
 
                 if (!requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray()))
                 {
@@ -146,49 +161,68 @@ namespace AnakimOrchestrator.Infrastructure
                     HttpCompletionOption.ResponseHeadersRead,
                     cts.Token
                 );
+
+                result.ConnectionEstablished = true;
+                result.RequestBodySent = requestMessage.Content != null;
+                result.ResponseHeadersReceived = true;
+                result.UpstreamStatusCode = (int)response.StatusCode;
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
-                // Cliente cancelou a requisição (não é erro do proxy)
-                return;
+                result.ClientCancelled = true;
+                result.ErrorMessage = "Client cancelled the request.";
+                return result;
             }
             catch (OperationCanceledException)
             {
-                // Nosso timeout
+                result.IsTimeout = true;
+                result.IsUnknownState = result.ConnectionEstablished || result.RequestBodySent;
+                result.ErrorMessage = "Upstream timeout";
+
                 context.Response.StatusCode = StatusCodes.Status504GatewayTimeout;
                 await context.Response.WriteAsync("Upstream timeout", context.RequestAborted);
-                return;
+                return result;
             }
             catch (Exception ex)
             {
+                result.IsUnknownState = result.ConnectionEstablished || result.RequestBodySent;
+                result.ErrorMessage = ex.Message;
+
                 context.Response.StatusCode = StatusCodes.Status502BadGateway;
                 await context.Response.WriteAsync("Proxy error", context.RequestAborted);
                 Logger.LogError("Proxy forward error → " + ex);
-                return;
+                return result;
             }
 
-            // Status + cabeçalhos
             context.Response.StatusCode = (int)response.StatusCode;
 
             foreach (var header in response.Headers)
             {
                 if (!RestrictedResponseHeaders.Contains(header.Key))
+                {
                     context.Response.Headers[header.Key] = header.Value.ToArray();
+                }
             }
+
             foreach (var header in response.Content.Headers)
             {
                 if (!RestrictedResponseHeaders.Contains(header.Key))
+                {
                     context.Response.Headers[header.Key] = header.Value.ToArray();
+                }
             }
 
-            // Evita duplicar tamanho/transfer-encoding
             context.Response.Headers.Remove("Content-Length");
             context.Response.Headers.Remove("Transfer-Encoding");
 
-            // Corpo (streaming)
+            result.ResponseBodyStarted = true;
+
             await using var respStream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
             await respStream.CopyToAsync(context.Response.Body, 81_920, context.RequestAborted);
             await context.Response.Body.FlushAsync(context.RequestAborted);
+
+            result.Success = true;
+            return result;
         }
 
         /// <summary>

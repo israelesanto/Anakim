@@ -20,6 +20,11 @@ using System.Net.Sockets;     // <- p/ TcpClient
 using System.Text;            // <- p/ StringBuilder, Encoding
 using System.IO;              // <- p/ File/Path
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using AnakimOrchestrator.Infrastructure.RequestProtection.Contracts;
+using AnakimOrchestrator.Infrastructure.RequestProtection.Journal;
+using AnakimOrchestrator.Infrastructure.RequestProtection.Options;
+using AnakimOrchestrator.Infrastructure.RequestProtection.Services;
+using AnakimOrchestrator.Infrastructure.RequestProtection.Stores;
 
 using TMResolver = AnakimOrchestrator.TrafficManager.TrafficManagerHelpers;
 using PIResolver = AnakimOrchestrator.ProxyInstance.ProxyInstanceHelpers;
@@ -135,6 +140,8 @@ class Program
                 .Configure((app) =>
                 {
                     var config = app.ApplicationServices.GetRequiredService<IConfiguration>();
+                    var requestProtectionService = app.ApplicationServices.GetRequiredService<IRequestProtectionService>();
+
                     var proxySettings = config.GetSection("ProxySettings").Get<ProxySettings>()
                         ?? throw new InvalidOperationException("Configuração 'ProxySettings' não encontrada ou inválida.");
 
@@ -272,22 +279,85 @@ class Program
                                             }
                                             else
                                             {
-                                                Logger.LogInfo("[PIPELINE] PI → melhor AH]");
+                                                Logger.LogInfo("[PIPELINE] PI → melhor AH");
+
+                                                var requestBody = await ReadRequestBodyAsync(ctx);
+
+                                                var protectedRequest = await requestProtectionService.RegisterAsync(
+                                                    ctx,
+                                                    requestBody,
+                                                    ctx.RequestAborted);
+
+                                                await requestProtectionService.MarkAsPersistedAsync(
+                                                    protectedRequest.RequestId,
+                                                    ctx.RequestAborted);
+
                                                 var targetUrl = await PIResolver.ResolveBestApplicationHandlerUrlAsync(ctx, config);
                                                 if (string.IsNullOrEmpty(targetUrl))
                                                 {
-                                                    // O resolver do PI já respondeu 503 ("No Application Handler available")
+                                                    await requestProtectionService.MarkAsFailedAsync(
+                                                        protectedRequest.RequestId,
+                                                        "Nenhum Application Handler disponível para processar a requisição.",
+                                                        ctx.RequestAborted);
+
                                                     return;
                                                 }
-                                                await ProxyUtils.RedirectWithBodyAsync(ctx, targetUrl);
+
+                                                await requestProtectionService.MarkAsDispatchingAsync(
+                                                    protectedRequest.RequestId,
+                                                    targetUrl,
+                                                    ctx.RequestAborted);
+
+                                                await requestProtectionService.MarkAsInFlightAsync(
+                                                    protectedRequest.RequestId,
+                                                    ctx.RequestAborted);
+
+                                                var forwardResult = await ProxyUtils.RedirectWithBodyAsync(ctx, targetUrl);
+
+                                                if (forwardResult.Success)
+                                                {
+                                                    await requestProtectionService.MarkAsCompletedAsync(
+                                                        protectedRequest.RequestId,
+                                                        forwardResult.UpstreamStatusCode ?? ctx.Response.StatusCode,
+                                                        null,
+                                                        ctx.RequestAborted);
+
+                                                    return;
+                                                }
+
+                                                if (forwardResult.ClientCancelled)
+                                                {
+                                                    Logger.LogInfo($"[PI] Requisição cancelada pelo cliente. RequestId: {protectedRequest.RequestId}");
+
+                                                    await requestProtectionService.MarkAsFailedAsync(
+                                                        protectedRequest.RequestId,
+                                                        forwardResult.ErrorMessage ?? "A requisição foi cancelada pelo cliente.",
+                                                        ctx.RequestAborted);
+
+                                                    return;
+                                                }
+
+                                                // A partir do momento em que a requisição já foi marcada como InFlight,
+                                                // qualquer falha sem sucesso confirmado deve ser tratada como estado incerto.
+                                                Logger.LogWarning($"[PI] Estado incerto detectado após InFlight. RequestId: {protectedRequest.RequestId}. Erro: {forwardResult.ErrorMessage}");
+
+                                                await requestProtectionService.MarkAsUnknownAsync(
+                                                    protectedRequest.RequestId,
+                                                    forwardResult.ErrorMessage ?? "Falha em estado incerto durante o encaminhamento ao Application Handler.",
+                                                    ctx.RequestAborted);
+
+                                                return;
                                             }
                                             return;
                                         }
                                         catch (Exception ex)
                                         {
                                             Logger.LogError("Falha ao redirecionar: " + ex);
-                                            ctx.Response.StatusCode = StatusCodes.Status502BadGateway;
-                                            await ctx.Response.WriteAsync("Proxy error");
+                                            if (!ctx.Response.HasStarted)
+                                            {
+                                                ctx.Response.StatusCode = StatusCodes.Status502BadGateway;
+                                                await ctx.Response.WriteAsync("Proxy error");
+                                            }
                                             return;
                                         }
                                     }
@@ -382,6 +452,13 @@ class Program
                         return h;
                     });
 
+                services.Configure<RequestProtectionOptions>(
+                    configuration.GetSection("RequestProtection"));
+
+                services.AddSingleton<IProtectedRequestStore, ProtectedRequestStore>();
+                services.AddSingleton<IRequestJournal, FileRequestJournal>();
+                services.AddSingleton<IRequestProtectionService, RequestProtectionService>();
+
                 // --------- Serviços internos ----------
                 if (proxySettings.Mode == 3) // AH
                 {
@@ -429,5 +506,25 @@ class Program
 
         Logger.LogSuccess("Application initialized successfully!");
         await host.RunAsync();
+    }
+
+    private static async Task<string> ReadRequestBodyAsync(HttpContext context)
+    {
+        context.Request.EnableBuffering();
+
+        context.Request.Body.Position = 0;
+
+        using var reader = new StreamReader(
+            context.Request.Body,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: false,
+            bufferSize: 1024,
+            leaveOpen: true);
+
+        var body = await reader.ReadToEndAsync();
+
+        context.Request.Body.Position = 0;
+
+        return body;
     }
 }
